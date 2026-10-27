@@ -244,6 +244,7 @@ log()  { printf '%s[%s]%s %s\n' "$(_c 1 '1;36')" "$(basename "$0")" "$(_c 1 0)" 
 warn() { printf '%s[%s] WARN:%s %s\n' "$(_c 2 '1;33')" "$(basename "$0")" "$(_c 2 0)" "$*" >&2; }
 die()  { printf '%s[%s] ERROR:%s %s\n' "$(_c 2 '1;31')" "$(basename "$0")" "$(_c 2 0)" "$*" >&2; exit 1; }
 
+[[ -n "${HF_TOKEN:-}" ]] || [[ ! -f "$HOME/.cache/huggingface/token" ]] || HF_TOKEN=$(head -n 1 "$HOME/.cache/huggingface/token" 2>/dev/null)
 [[ -z "${HF_TOKEN:-}" ]] || export HF_TOKEN
 ablit_notice() {
   [[ "$EAQ_V1_1" =~ ^[01]$ ]] || die "EAQ_V1_1 is 0 or 1, not $EAQ_V1_1"

@@ -41,7 +41,7 @@ exec 9>"$STATE_DIR/prepare.lock"
 flock -n 9 || die "another prepare.sh is already running; wait for it or stop it: pgrep -af prepare.sh"
 # Check gated access before building images or downloading hundreds of GB. hf uses HF_TOKEN or its saved login;
 # never pass the token as an argument or forward it to the worker or serving containers.
-if [[ "$ABLIT" == 1 ]]; then
+if [[ "$ABLIT" == 1 && ! -f "$DATA_DIR/checkpoint/.ablit-ready" ]]; then
   overlay_sub="hub/models--${ABLIT_ID//\//--}/snapshots/$ABLIT_REVISION"
   have_overlay=1
   for f in apply_mia29_wo_b_graft.py "$ABLIT_SIDECAR" EXL3_MIA29_ABLIT_META.json; do
@@ -172,7 +172,7 @@ log "Engram: $ESNAP ($(du -shL "$ESNAP" | cut -f1))"
 in_hf() { docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$HF_CACHE:/hf" "$@"; }
 
 # Apply before either rank's cache is built: the index hash alone cannot distinguish changed tensor contents.
-if [[ "$ABLIT" == 1 ]]; then
+if [[ "$ABLIT" == 1 && ! -f "$DATA_DIR/checkpoint/.ablit-ready" ]]; then
   overlay_sub="hub/models--${ABLIT_ID//\//--}/snapshots/$ABLIT_REVISION"
   for f in apply_mia29_wo_b_graft.py "$ABLIT_SIDECAR" EXL3_MIA29_ABLIT_META.json; do
     [[ -s "$HF_CACHE/$overlay_sub/$f" ]] || die "matching Mia overlay file is missing: $f"
