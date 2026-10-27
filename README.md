@@ -12,19 +12,23 @@ through an OpenAI-compatible API, with the full **1,048,576-token window**, **im
 or off, and **DSpark** speculative decoding from the checkpoint's own draft blocks, using
 [TensorFold](https://github.com/ashhart/TensorFold)'s native Zig engine and the 2.9 bit EXL3 quantization
 [`Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw`](https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw)
-(196 GiB; experimental: its model card has no perplexity or KL measurement against the unquantized model).
+(196 GiB; its model card has no perplexity or KL measurement against the unquantized model). EAQ v1 is the recommended
+pack; the experimental EAQ v1.1 pack is opt-in with `EAQ_V1_1=1`.
 
 - Checkpoint: `Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw` (39 shards, routed experts at 3 bits a
   weight, 2 bits in layers 18-22, attention at 5, shared experts at 4-5, head at 6, DSpark blocks at 4; the vision tower
-  and the DSpark blocks are in it; the revision is pinned in `scripts/config.sh`), plus Engram's two tables, unquantized,
-  from `deepseek-ai/DeepSeek-V4.1-Flash-1017` @ `1bae0e10` (shards 47 and 48, ~203 GB; the quantization leaves them out)
+  and the DSpark blocks are in it; the revision is pinned in `scripts/config.sh`), plus Engram's two tables, unquantized, from
+  `deepseek-ai/DeepSeek-V4.1-Flash-1017` @ `1bae0e10` (shards 47 and 48, ~203 GB; the quantization leaves them out).
+  `EAQ_V1_1=1` switches to `Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1.1-2.9-bpw` @ `aee640e2` (39 shards, ~196 GiB;
+  27 indexer/compressor linears are BF16 and load as plain BF16 linears through patch `0024`'s mixed-pack loader)
 - API model id: `DeepSeek-V4.1-Flash-1017`, port 8888
 - Engine: TensorFold native (Zig 0.17.0), BertholomusAI's `dsv41` family at TP=2, one rank on each Spark
 - One command on the first Spark: `./start.sh` sets up both Sparks and starts both ranks; `./stop.sh` stops them
 - Optional [systemd user service](docs/systemd.md): supervise both ranks with preparation disabled, delayed restarts
   and a start limit. Copy and enable it manually; the recipe does not install a service.
-- Optional `ABLIT=1`: keeps Mia EAQ 2.9 bpw and applies the matching [Keys overlay by drowzeys](https://huggingface.co/drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated).
-  Requires your Hugging Face token and access to that gated repository; see [Abliterated mode](#abliterated-mode).
+- Optional `ABLIT=1`: keeps Mia EAQ v1 2.9 bpw (the default) and applies the matching [Keys overlay by drowzeys](https://huggingface.co/drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated).
+  Requires your Hugging Face token and access to that gated repository; leave `EAQ_V1_1=0`; see
+  [Abliterated mode](#abliterated-mode).
 
 ## Status
 
@@ -92,7 +96,7 @@ the load, 4.9 at 159K tokens, 4.2 at 261K), and a larger `CONTEXT` only allows l
 such a head, or free more of its memory first. A 100K-token prompt also ran without errors at the full
 1,048,576-token window (3.14 GiB free at the lowest) and at 524,288 tokens.
 
-**Engine patches** (`zig/patches/`; `zig/patches/README.md` lists them). The indexer split runs by default in chunks ending at token 131,072 or later; idle RDMA back-off is also enabled. The recorded token-hash checks cover 31 prompts through 100,000 tokens, cached resumes and four concurrent streams. Each switch is a `TF_DS_*` or `TF_RDMA_*` variable, which
+**Engine patches** (`zig/patches/`; `zig/patches/README.md` lists them). The indexer split runs by default in chunks ending at token 131,072 or later; idle RDMA back-off is also enabled. EAQ v1.1's mixed-pack loader (`0024` + `zig/patches-inputs/0001`), its BF16 -> f32 widen (`0025` + `zig/patches-inputs/0002`) and its plain-linears row padding (`0026`, `TF_DS_PLAIN_ROWS`) are automatic. The recorded token-hash checks cover 31 prompts through 100,000 tokens, cached resumes and four concurrent streams. Each switch is a `TF_DS_*` or `TF_RDMA_*` variable, which
 `start.sh` gives to both ranks, and each was tested on its own:
 
 | Switch | Result |
@@ -180,7 +184,7 @@ watchdog exists because that can freeze a Spark; see [Memory and safety](#memory
   leave `HEAD_NFS_SERVER` empty. Set `PREPARE=0` too: `scripts/prepare.sh` assumes a complete cache and would start downloading
   the 196 GiB checkpoint into a partial one.
 
-The former default checkpoint revision `6d54be4f` no longer resolves on the Hub. The default now pins `45ee5d0f`; changing revisions changes the Hugging Face snapshot path and may require another 196 GiB download. Keep an existing local snapshot only by explicitly setting `MODEL_REVISION` and using the documented cached/offline preparation flow.
+The former default checkpoint revision `6d54be4f` no longer resolves on the Hub. The default now pins `45ee5d0f` (EAQ v1); `EAQ_V1_1=1` pins `aee640e2` (EAQ v1.1). Changing revisions changes the Hugging Face snapshot path and may require another 196 GiB download. Keep an existing local snapshot only by explicitly setting `MODEL_REVISION` and using the documented cached/offline preparation flow.
 
 ## Quick start
 
@@ -216,14 +220,17 @@ API_URL=http://<head-address>:8888 python3 tools/toolcheck.py    # also needle.p
 ```
 
 `stop.sh` saves each rank's log (gzipped, newest 10 kept, `LOG_KEEP`) to `~/.cache/dsv41-tensorfold/logs` before it removes
-the container.
+the container. While a rank runs, docker rotates its log at `LOG_MAX_SIZE` (`100m`), keeping `LOG_MAX_FILE` (3) files: the
+engine writes a line for every response, so a monitoring poll (`/health`, `/metrics`) no longer grows it without end (#49).
+`LOG_MAX_SIZE=` (empty) leaves the docker daemon's own log settings.
 
 ## Abliterated mode
 
 `ABLIT` accepts **`0` or `1`** (default `0`). Set it in the environment, `scripts/local.sh` or `.env`.
-`ABLIT=0` serves the stock Mia EAQ v1 2.9 bpw checkpoint. `ABLIT=1` keeps that checkpoint and applies
-`exl3_wo_b_l10_35_mia29.safetensors` from
-[`drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated`](https://huggingface.co/drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated).
+`ABLIT=0` serves the stock checkpoint (`MODEL_ID`/`MODEL_REVISION`; the default is Mia EAQ v1 2.9 bpw).
+`ABLIT=1` keeps the **EAQ v1** 2.9 bpw checkpoint and applies `exl3_wo_b_l10_35_mia29.safetensors` from
+[`drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated`](https://huggingface.co/drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated);
+it is refused when `EAQ_V1_1=1`, so leave `EAQ_V1_1=0` (the default) for it.
 This repository supplies overlays, not a full checkpoint. The recipe uses its **matching Mia 2.9 bpw** overlay and
 `apply_mia29_wo_b_graft.py`; the FP8, LibertAI 3.5 bpw and Jayleaton 2.8 bpw sidecars are for other packs.
 
@@ -303,12 +310,13 @@ Settings come from the environment, `scripts/local.sh` or `.env`; the defaults a
 
 | Setting | Default | |
 | --- | --- | --- |
-| `MODEL_ID`, `MODEL_REVISION` | `Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw` @ `45ee5d0f` | the checkpoint. The Hub repo was renamed from `...-1017-EAQ-v1-2.9-bpw` (the old name redirects), and the Hugging Face cache is keyed by the repo's name and revision: a copy under the old name or an older revision (e.g. `e8ac7684`, which the Hub no longer has) is not found under the default, and `scripts/prepare.sh` would download 196 GiB. It now stops when the disk cannot hold that. To keep serving a copy you have, set both to what `~/.cache/huggingface/hub` holds |
+| `EAQ_V1_1` | 0 | `0`: EAQ v1 (the recommended pack); `1`: the experimental EAQ v1.1 mixed pack (27 BF16 indexer/compressor linears; the image's mixed-pack loader handles them) |
+| `MODEL_ID`, `MODEL_REVISION` | `Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw` @ `45ee5d0f` | the checkpoint. `EAQ_V1_1=1` selects `Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1.1-2.9-bpw` @ `aee640e2`; an explicit `MODEL_ID`/`MODEL_REVISION` wins. The Hugging Face cache is keyed by the repo's name and revision: a copy under another name or revision is not found under the default, and `scripts/prepare.sh` would download 196 GiB. It stops when the disk cannot hold that. To keep serving a copy you have, set both to what `~/.cache/huggingface/hub` holds. v1.1's 27 BF16 linears load through the image's mixed-pack loader (`zig/patches/0024` + `zig/patches-inputs/0001`); the load prints `mixed pack: 27 float linears`. An EXL3-only pack (EAQ v1) has no plain entries and takes the old path |
 | `ABLIT` | 0 | `0`: stock Mia EAQ 2.9 bpw; `1`: apply the matching gated Keys overlay; requires your HF token and repository access (see Abliterated mode) |
 | `ABLIT_REVISION` | `0bdc2036113c4fdda38ef6005b3cbc0bc0dfa0f0` | pinned Keys overlay and application script; full commit hash |
 | `HF_TOKEN` | unset | Hugging Face read token for downloads; alternatively authenticate with `hf auth login` on the head |
 | `CONTEXT` | 1048576 | a request's positions at most; rank 1's `--pool` follows it, or `POOL` |
-| `POOL` | empty | positions the streams' extents and kept prompts share, when more than `CONTEXT` (empty: `CONTEXT`; not below it; `zig/patches/0008`): more long prompts stay resident and more long requests run at once. A request still stops at `CONTEXT`. Its KV caches grow with it, about 0.9 GiB a rank per 1,048,576 positions, in host memory: at `POOL=2097152` the head's idle `MemAvailable` went from 6.76 to 5.71 GiB and its lowest during a cold 96K-token prompt from 5.89 to 4.49 GiB (worker: 8.63 to 7.43 and 8.60 to 7.33), so measure the head's headroom before raising it |
+| `POOL` | empty | positions the streams' extents and kept prompts share, when more than `CONTEXT` (empty: `CONTEXT`; not below it; `zig/patches/0008`): more long prompts stay resident and more long requests run at once. A request still stops at `CONTEXT`. Its KV caches grow with it, about 0.9 GiB a rank per 1,048,576 positions, in host memory: at `POOL=2097152` the head's idle `MemAvailable` went from 6.76 to 5.71 GiB and its lowest during a cold 96K-token prompt from 5.89 to 4.49 GiB (worker: 8.63 to 7.43 and 8.60 to 7.33), so measure the head's headroom before raising it. With `KV_SHARD=1` the same `POOL` is cut into one part a Spark (each must hold a whole `CONTEXT` window; empty: the pool sharding needs, 2101248 at the 1M window), and each Spark keeps only its own part's compressed KV: about half the KV memory a Spark for the same `POOL` (measured at 2,101,248: 1,062 MiB a rank against 1,783 MiB replicated) |
 | `PARALLEL` | 4 | requests at once (the engine's streams, 1 to 16; the family was measured at 4) |
 | `THINKING`, `REASONING_EFFORT` | 1, empty | think first unless a request turns it off; `low` / `medium` / `high` / `xhigh` as the default effort |
 | `THINKING_BUDGET` | empty | reasoning tokens a reply may spend before the engine closes the think block itself and lets the answer continue (`--thinking-budget`; a request's `thinking_budget` wins); empty: no cap. A hard task can otherwise spend its whole `MAX_TOKENS` thinking and end with no text and no tool call. A model that keeps rambling after the cut is not stopped by it. For long agentic or tool-calling jobs, leave it empty or set it large: a small budget cuts the reasoning mid-plan, which can make the model repeat a tool call it already made |
@@ -327,10 +335,89 @@ Settings come from the environment, `scripts/local.sh` or `.env`; the defaults a
 | `HOST`, `PORT`, `SERVED_NAME`, `SERVED_ALIAS` | 0.0.0.0, 8888, `deepseek-v4.1-flash`, `DeepSeek-V4.1-Flash-1017` | |
 | `WORKER`, `FABRIC_PEER`, `NFS_*` | | see Requirements |
 | `TF_REF`, `INPUTS_REF`, `KIT_REF` | pinned | the engine, the inputs' tools and the kit (changing one rebuilds or re-checks) |
+| `SPILL_GIB`, `SPILL_DIR`, `WORKER_SPILL_DIR`, `SPILL_FLOOR_GIB`, `SPILL_QUOTA_GIB` | 0 (off), beside `HF_CACHE`, `SPILL_DIR`, 50, 0 | spill v2: kept prompt states on each Spark's own NVMe ([Spill v2 and KV sharding](#spill-v2-and-kv-sharding-ported-off-by-default)) |
+| `KV_SHARD`, `KV_SHARD_DECODE` | 0 (off), empty | KV sharding: the same `POOL` cut into one part a Spark, each Spark keeping only its part's compressed KV (same section) |
+| `ZIG_MIRRORS` | `https://zig.linus.dev/zig` | where the image build downloads Zig first (ziglang.org last), with bounded retries; the bytes are pinned by `ZIG_SHA256` |
 | `PULL` | 1 | `0` never pulls a published image (`GHCR_IMAGE`, `IMAGE_TAG`, `IMAGE_DIGEST`; the image of these pins is `ghcr.io/miaai-lab/deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-7c9bf5d36350`) |
 
-Extra arguments to `./start.sh` go to rank 0's `tensorfold-native serve` after the defaults; every `TENSORFOLD_*` and
-`TF_DS_*` variable you set goes to both ranks. Images are always on (rank 0 runs the vision tower).
+Extra arguments to `./start.sh` go to rank 0's `tensorfold-native serve` after the defaults; every `TENSORFOLD_*`,
+`TF_DS_*` and `TF_SPILL_*` variable you set goes to both ranks. Images are always on (rank 0 runs the vision tower).
+
+## Spill v2 and KV sharding (ported, off by default)
+
+The port of Robert Wojciechowski's ([wojo](https://github.com/wojo) on GitHub, [@rwojo](https://x.com/rwojo) on X) GLM-5.3-Flash patches into this engine: the spill
+tier and its v2 block store (GLM `0088` and `0110`, PRs #78 and #124; the block layout, lineage, write-at-keep ring and
+fsync order are [BadAd84](https://github.com/BadAd84)'s block-tier design), chat continuation (`0111`, PR #128), KV
+sharding with prompt borrowing and the ring exchange (`0118`, PR #152) and the parked-page startup budget (`0119`, PR
+#149). The engine changes come in as `zig/patches/0011-...` to `0022-...`, one patch per feature, after `0008` and
+`0010` ([zig/patches/README.md](zig/patches/README.md)). **Everything is off by default**, in the engine and in the recipe: with
+`SPILL_GIB` and `KV_SHARD` unset (or `0`) and `POOL` empty the recipe runs as before the port, with no flag, variable
+or mount it did not have (one engine change acts regardless, after a failure only: a broken rank pair ends the
+server, below). Turn them on in `scripts/local.sh`: `SPILL_GIB=64 KV_SHARD=1` is what the pair was validated
+with (replies byte-identical to the stock engine in every configuration: all off, `POOL`, KV sharding at 1 and 8
+streams, spill, spill with KV sharding; restore after eviction, a restart and damaged files). Full detail:
+[docs/PORT-RECIPE.md](docs/PORT-RECIPE.md).
+
+**Set explicitly, a feature that cannot run refuses the start:** a spill folder that cannot be used (missing and not
+creatable, not yours, on NFS or tmpfs, inside the export or a model folder, below `SPILL_FLOOR_GIB` free) on either
+Spark, or `KV_SHARD=1` with a `POOL` it cannot cut into two whole-window parts (such as `POOL=1048576`). A fork that
+turns the defaults on (`PORT_SPILL_DEFAULT_GIB` / `PORT_SHARD_DEFAULT` in `scripts/port.sh`) gets the other behaviour
+for those defaults: the start goes on **without** the feature, with a loud `SPILL TIER OFF for this start` /
+`KV SHARDING OFF for this start` warning.
+
+- **Spill v2** (`SPILL_GIB`): each kept prompt state is written, when it is kept, to each Spark's own local disk in
+  2,048-token blocks that later turns of the conversation share, and read back instead of a new prefill: after
+  eviction, after a restart, after a crash. Room is made by conversation (old turns past the newest few, abandoned
+  forks, whole conversations least recently used, shared prefixes last), with an optional per-conversation quota.
+- **KV sharding** (`KV_SHARD=1`): builds on `zig/patches/0008`'s pool. There is one `POOL` setting, the total pool
+  positions (`CONTEXT` stays the window one request may use); with `KV_SHARD=1` that same pool is cut into one part a
+  Spark, and each conversation's compressed latents are stored once, on the Spark whose part holds it, instead of on
+  both. Each part must hold a whole window (`CONTEXT` plus a round's rows and two, in whole 2,048-position blocks), so
+  at the 1,048,576-token window `POOL=2101248`: left empty, it is derived; a `POOL` that would cut a conversation's
+  window is refused, naming the value. **The same `POOL` costs about half the KV memory a Spark** (owner-only planes):
+  measured at 2,101,248 positions, 1,062 MiB a rank against 1,783 MiB replicated, for 1-4% decode. Runs together with
+  spill.
+
+| Switch | Default | |
+| --- | --- | --- |
+| `SPILL_GIB` | `0` (off) | the spill tier's cap a Spark, GiB (`64` validated). A Spark whose folder fails the checks refuses the start |
+| `SPILL_DIR` / `WORKER_SPILL_DIR` | `$(dirname HF_CACHE)/dsv41-tensorfold-spill` / `SPILL_DIR` | each rank's own folder on its local NVMe, mounted at `/spill`. Never inside `HF_CACHE` (it is the NFS export the worker reads), never on a network file system, never under an archive folder: `start.sh` checks this on both Sparks, creates the folder as you, and refuses a root-owned one |
+| `SPILL_FLOOR_GIB` | `50` | free disk the tier always leaves on that file system |
+| `SPILL_QUOTA_GIB` | `0` (none) | one conversation's share of `SPILL_GIB` before its own old turns and forks go first |
+| `SPILL_MIN_TOKENS`, `SPILL_STAGING_MIB`, `SPILL_TURNS`, `SPILL_FLUSH_MS` | `8192`, `128`, `4`, `60000` | the tier's shortest written state, pinned staging, turns kept, stop flush bound: the same on both ranks |
+| `KV_SHARD`, `KV_SHARD_DECODE` | `0` (off), empty (`fetch`) | KV sharding; `owner` for owner-computed decode |
+| `KV_SHARD_CARRY`, `KV_SHARD_TWINS`, `KV_SHARD_CHECK` | `1`, `1`, `1024` | carries and live moves, borrowed twins, rounds between the ranks' planner checks |
+| `POOL` | empty (with `KV_SHARD=1`: two owner parts of a whole `CONTEXT` window each, 2101248 at 1048576; with `KV_SHARD=0`: `CONTEXT`) | `zig/patches/0008`'s setting (both ranks' `TF_DS_POOL`, `TF_DS_WINDOW` and rank 1's `--pool`); `TF_DS_POOL` exported by hand is ignored |
+
+Both ranks get the same settings (the engine's flags and variables are mapped in one place, `scripts/port.sh`); both
+containers are labelled with them, and `./start.sh` will not adopt two running ranks that disagree. With the spill tier
+on, `start.sh` also gives both ranks the identity the engine requires (the image's patch hash and ref, the checkpoint's
+and Engram's revisions, each rank's weight-file digest, computed once and cached beside the file). **Disk use**
+(calculated): ~890 bytes a token a Spark replicated, 1,822,720 bytes per 2,048-token block (~85 MiB for a 100K-token
+conversation, ~890 MiB for the 1M window) plus 6.4 MiB a kept point a Spark; with KV sharding the owner
+Spark writes ~890 and the other ~170 bytes a token. Blocks a later turn shares are stored once. The tier holds at most
+`SPILL_GIB` (64 GiB) of each Spark's own disk and always leaves `SPILL_FLOOR_GIB` (50 GiB) free there. The engine runs as root; spill
+files are given back to the folder's owner before each start and at every stop, by a container that can do nothing
+else (only the folder start.sh accepted and marked, only root-owned files and folders in it, no symlinks, no network,
+only the CHOWN and DAC_READ_SEARCH capabilities; `scripts/port.sh`, `spill_fix_owner`). With the tier on, `./stop.sh` gives
+the ranks 90 s (`SPILL_FLUSH_MS` plus 30 s) to write what still waits.
+
+**A broken rank pair ends the server** (`zig/patches/0020`): when rank 1 dies or hangs, or a spill-tier or KV-transfer
+exchange breaks, rank 0 fails its requests and exits with status 75 instead of hanging forever (a dead rank 1 is seen
+within seconds, a hung one after 120 s without progress). This one is on with two ranks whatever the settings, since
+it acts only after a failure (replies are unchanged); `TF_DS_PAIR_BROKEN=degrade` opts out. To have both ranks start
+again by themselves, run under the [systemd user service](docs/systemd.md); without a supervisor the server stays
+down until `./start.sh restart`. Either way the failed run's logs are saved first (`stop.sh` saves each rank's log,
+an exited container's too, and `start.sh` hands any container it finds to `stop.sh` before it launches). Details:
+[docs/PORT-RECIPE.md](docs/PORT-RECIPE.md) "When the rank pair breaks".
+
+**Rollback:** `SPILL_GIB=0` / `KV_SHARD=0` (and `POOL` empty) with `./start.sh restart` turns a feature
+off on the same image. The previous image comes back with `SPILL_GIB=0 KV_SHARD=0 IMAGE=<its tag> PREPARE=0 ./start.sh
+restart` (every port setting off, explicitly, in case a fork turned a default on), or by restoring the exact tree it was built from, commit **and** working-tree diff (the image tag is a
+hash of `zig/patches` and `zig/Dockerfile` as they are on disk), then `./start.sh restart`: record both at deploy, as
+[docs/PORT-RECIPE.md](docs/PORT-RECIPE.md) describes. Spilled files stay in each Spark's folder for inspection
+(`rm -rf <SPILL_DIR>/native-spill-*` reclaims them); no weights, Engram or NFS change in either direction, and the
+memory guards are unchanged.
 
 For agent jobs that loop at `reasoning_effort: "max"`, try `"high"` with the same request and compare both reasoning and tool-call output (#33, #37). The pinned engine maps `high` to 75, `xhigh` to 88 and `max` to 100; the HTTP field accepts the named efforts, not arbitrary integers. No universal `THINKING_BUDGET` is validated for agent tasks: closing the reasoning block does not guarantee a tool call or stop repetition, and a small budget can cut a plan short. A client's explicit `max_tokens` / `max_completion_tokens` takes precedence over the server default; bound it in the request when needed. These reports alone do not establish that quantization caused the loop.
 
@@ -338,7 +425,15 @@ For agent jobs that loop at `reasoning_effort: "max"`, try `"high"` with the sam
 
 `CONTEXT` limits one request and, when `POOL` is empty, also sizes the shared pool of KV positions. Lowering it can evict conversations even when each conversation fits individually: several histories compete for the same positions. `POOL` can now keep more positions than the request window, but uses additional memory on both ranks; set `POOL`, not raw `TF_DS_POOL` / `TF_DS_WINDOW`. The separate prompt-state budget (512 MiB by default) does not add KV positions, and increasing it alone cannot fix an undersized pool. Placement still retires the oldest kept states, so a larger pool does not guarantee that an idle coordinator survives a succession of other conversations (#20, #27).
 
+Admission reserves a stream's prompt *and* its reply together: `prompt + max_tokens + ROUND_ROWS + 2` positions (18 more at the default 16-row rounds), aligned to 2,048 (`zig/src/families/dsv41/lanes.zig:768` with `zig/patches` applied; a request that names no budget gets `MAX_TOKENS`), and a request whose prompt and budget together exceed the pool is refused (`PromptTooLong`), not queued. So the equal split of a pool is not `POOL / PARALLEL` of context: at `POOL=2097152` with a 131,072-token reply budget, four equal streams fit about 393,000 tokens of context each (`2097152 / 4 - 131072 - 18`). Keeping `MAX_TOKENS` at what the harnesses send explicitly keeps requests that name no budget from reserving more than that.
+
+Measured on a 2x DGX Spark serving (`POOL=2097152`, drafts on, the pool of `0008`, #10): four concurrent cold prompts of 500,601 tokens each — 2,002,404 positions live at once, 96% of the pool — were all admitted and answered (a 1,273 s round). The head's `MemAvailable` sat at 6.2-6.3 GiB idle and bottomed around 3.3 GiB during the four parallel cold prefills (memguard's floor: 2.5 GiB): four parallel cold prefills of long prompts are the worst case for available memory, and staggering session starts a minute or two apart keeps the dip well above the floor. These numbers are with the head running headless — a desktop session on the head takes a GiB or two of the same headroom, and with one running the worst-case dip lands under memguard's floor (an earlier setup here, desktop on, could not hold even a 1,048,576-position pool and ran a halved window instead; the head went headless before the pool was raised at all).
+
 “Computed prefill” counts prompt tokens processed again; “cached prefill” counts reused prompt tokens. Fresh unrelated prompts, including the default randomized `tools/bench.py` workload, are expected to have no cache hits. For a continuing long conversation, check the server's cached-token counters and use `python3 tools/prompt_reuse.py --require-counter`; a dashboard showing zero may also mean it does not read the server's counter. Short prompts may not retain a snapshot.
+
+`/health`'s `prefill_tokens_per_second` is set when a prompt pass ends and shown for 2 s after it (the engine's
+`zig/src/core/lane_host.zig`), so it reads 0 for the whole of a long pass: a dashboard showing high power with no decode
+and prefill 0 is usually one long cold prefill, not a hang (#18, #34).
 
 A Spark's GPU shares its memory with the host. A rank that takes all of it does not get a clean error: the machine stops
 answering and has to be power-cycled (this happened once, with the engine's reserve lowered to 10 GiB). So:
@@ -378,8 +473,11 @@ scripts/nodes.sh             the worker over ssh, the CX7 link and its RoCE rail
 scripts/prepare.sh           image, downloads, kit, token map, weight files, the worker's NFS volume and disk
 scripts/memguard.sh          the memory watchdog start.sh runs on both Sparks (kills a rank's container below MEMGUARD_GIB)
 scripts/zig_flags.py         start.sh's check of rank 0's serve flags against the image's `capabilities --json`
+scripts/port.sh              the ported features' settings (spill v2, KV sharding, POOL), checks and engine mapping
+scripts/port_test.sh         checks of scripts/port.sh (no Sparks needed)
+scripts/port-patches.sh      exports engine work after the port's series as zig/patches/0024-..., checked on a clean TF_REF
 scripts/publish-image.sh     pushes the built image to ghcr.io (only on purpose)
-zig/Dockerfile, zig/patches  the engine image; patches to the pinned engine (three)
+zig/Dockerfile, zig/patches  the engine image; patches to the pinned engine (see `zig/patches/README.md`)
 model/chat_template.jinja    the chat template rank 0 serves
 tools/validate.py            an end-to-end check of a running server
 tools/bench.py               prefill, decode, multi-stream and needle measurements as JSON, with `--compare A.json B.json`
@@ -388,6 +486,8 @@ tools/smoke.py               a quick correctness check: health, stop strings, st
 tools/prompt_reuse.py        a conversation resumes from its kept prompt state (from the GLM-5.3-Flash recipe)
 tools/toolcheck.py, needle.py, end_of_turn.py, anthropiccheck.py   single checks, from the GLM-5.3-Flash recipe
 docs/zig-engine.md           how the pieces fit, and what is not verified
+docs/PORT-RECIPE.md          the GLM port's settings, their engine mapping, deploy and rollback
+docs/FORK-DEPLOY.md          updating and rolling back the port fork that serves on gx10-a
 docs/hermes-agent.md         Hermes Agent as a client (by Steve Darlow)
 ```
 
@@ -401,11 +501,13 @@ third-party parts keep theirs ([`NOTICE`](NOTICE)).
 
 - **[DeepSeek](https://huggingface.co/deepseek-ai)**: DeepSeek-V4.1-Flash-1017, its weights, its DSpark draft blocks, its
   Engram tables and its reference inference code (MIT).
-- **Mia's AI Lab** ([Mia-AiLab](https://huggingface.co/Mia-AiLab)): the EAQ v1 EXL3 2.9 bpw quantization served here,
+- **Mia's AI Lab** ([Mia-AiLab](https://huggingface.co/Mia-AiLab)): the EAQ v1 EXL3 2.9 bpw quantization served by default,
   [`Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw`](https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw)
-  (MIT), the earlier release
+  (MIT), the experimental EAQ v1.1 pack
+  [`Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1.1-2.9-bpw`](https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1.1-2.9-bpw)
+  (opt-in with `EAQ_V1_1=1`), the earlier release
   [`Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw`](https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw) whose
-  per-tensor widths it equals, and the chat template (`model/chat_template.jinja`, written for that earlier release).
+  per-tensor widths they equal, and the chat template (`model/chat_template.jinja`, written for that earlier release).
 - **[turboderp](https://github.com/turboderp-org)**: [ExLlamaV3](https://github.com/turboderp-org/exllamav3), the EXL3 format
   and its quantizer (MIT).
 - **[drowzeys](https://huggingface.co/drowzeys)**: authored the optional [Keys abliteration overlay and Mia EAQ 2.9 bpw

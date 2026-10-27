@@ -40,13 +40,28 @@ MASTER_ADDR="${MASTER_ADDR:-}"
 SOCKET_IFNAME="${SOCKET_IFNAME:-}"     # NCCL's bootstrap socket's netdev on both nodes (default: the link's)
 
 # ---------------------------------------------------------------- the checkpoint, the engine, the kernel kit
-# The weights: Mia's AI Lab's EAQ v1 EXL3 quantization of DeepSeek-V4.1-Flash-1017 at 2.9 bits a weight (39 shards, 196 GiB;
-# the vision tower and the DSpark draft blocks are in it). Its Engram n-gram tables are not: they are read unquantized from
+# The weights: Mia's AI Lab's EAQ EXL3 quantization of DeepSeek-V4.1-Flash-1017 at 2.9 bits a weight (39 shards,
+# ~196 GiB; the vision tower and the DSpark draft blocks are in it). EAQ v1 is the default: Mia's model card keeps it
+# the recommended pack. EAQ v1.1 is experimental (no perplexity or KL measurement against the unquantized model): set
+# EAQ_V1_1=1 for it. v1.1 keeps v1's widths but stores 27 indexer/compressor linears as BF16, so the engine must have
+# the mixed-pack loader; the image has it. Neither pack holds Engram's n-gram tables: they are read unquantized from
 # the base model's shards 47 and 48 (ENGRAM_ID, ~203 GB), which this Spark downloads beside it.
-MODEL_ID="${MODEL_ID:-Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw}"
-_rev=""; [[ "$MODEL_ID" == Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw ]] && _rev=45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b
+EAQ_V1_1="${EAQ_V1_1:-0}"   # 0: EAQ v1 (recommended); 1: EAQ v1.1 (experimental, BF16 mixed pack)
+_default_id=Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw
+_default_rev=45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b
+if [[ "$EAQ_V1_1" == 1 ]]; then
+  _default_id=Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1.1-2.9-bpw
+  _default_rev=aee640e2afba93be683bb5b9b420115fe7fbac20
+fi
+MODEL_ID="${MODEL_ID:-$_default_id}"
+_rev=""
+case "$MODEL_ID" in
+  Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw) _rev=45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b ;;
+  Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1.1-2.9-bpw) _rev=aee640e2afba93be683bb5b9b420115fe7fbac20 ;;
+esac
 MODEL_REVISION="${MODEL_REVISION-$_rev}"
-# Keys' matching Mia EAQ 2.9 bpw overlay (not a standalone checkpoint).
+# Keys' matching Mia EAQ 2.9 bpw overlay (not a standalone checkpoint). It matches EAQ v1, not v1.1: ABLIT=1 with
+# EAQ v1.1 is refused below; leave EAQ_V1_1=0 (the default) for the overlay.
 export ABLIT="${ABLIT:-0}"
 ABLIT_ID=drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated
 ABLIT_REVISION="${ABLIT_REVISION:-0bdc2036113c4fdda38ef6005b3cbc0bc0dfa0f0}"
@@ -73,10 +88,15 @@ KIT_REPO="${KIT_REPO:-https://github.com/bertholomus/deepseek-v4.1-tensorfold-tp
 KIT_REF="${KIT_REF:-abe07c7d509a0199cc7fec15263be2aa52ac652f}"
 ZIG_VERSION="${ZIG_VERSION:-0.17.0}"
 ZIG_SHA256="${ZIG_SHA256:-9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8}"   # zig-aarch64-linux-0.17.0.tar.xz
+# Where zig/Dockerfile downloads the compiler: these community mirrors first (space-separated; each serves
+# <base>/zig-aarch64-linux-<version>.tar.xz), then ziglang.org, each with bounded retries, the first that serves
+# ZIG_SHA256 wins. Set but empty (ZIG_MIRRORS=): ziglang.org only. Not part of the image hash (the bytes are pinned).
+ZIG_MIRRORS="${ZIG_MIRRORS-https://zig.linus.dev/zig}"
 BASE_IMAGE="${BASE_IMAGE:-nvcr.io/nvidia/pytorch:26.07-py3}"
 image_hash() {
   ( cd "$_cfg_root" || exit 1
     cat zig/patches/*.patch 2>/dev/null
+    cat zig/patches-inputs/*.patch 2>/dev/null
     cat zig/Dockerfile
     echo "$TF_REPO $TF_REF $INPUTS_REF zig-$ZIG_VERSION $ZIG_SHA256 $BASE_IMAGE"
   ) | sha256sum | cut -c1-12
@@ -107,6 +127,9 @@ CONTEXT="${CONTEXT:-1048576}"
 # long prompts stay resident (each kept prompt holds its extent) and more long requests run at once. Empty (default): CONTEXT, as before.
 # It may not be smaller than CONTEXT. Its KV caches grow with it (about 0.9 GiB a rank per 1,048,576 positions, in host memory: measure the
 # head's headroom first, see README); the RoPE tables stay the window's size. TF_DS_POOL, and TF_DS_WINDOW (= CONTEXT) on both ranks.
+# With KV_SHARD=1 (scripts/port.sh) the same POOL is cut into one part a Spark, each holding a whole CONTEXT window, and each Spark
+# keeps only its own part's compressed KV: about half the KV memory a Spark for the same POOL (measured at 2,101,248 positions:
+# 1,062 MiB a rank against 1,783 MiB replicated; decode 1-4% slower). Empty with KV_SHARD=1: the pool it needs (2,101,248 at 1,048,576).
 POOL="${POOL:-}"
 PARALLEL="${PARALLEL:-4}"              # requests at once (the engine's streams, TF_DS_STREAMS; the family measured 4)
 ROUND_ROWS="${ROUND_ROWS:-}"           # empty or 16: the pinned kit only has row kernels through 16 (issue #23)
@@ -171,6 +194,11 @@ fi
 STATE_DIR="${STATE_DIR:-$HOME/.local/state/dsv41-tensorfold}"   # locks and the prepared marker
 LOG_DIR="${LOG_DIR:-$HOME/.cache/dsv41-tensorfold/logs}"
 LOG_KEEP="${LOG_KEEP:-10}"
+# Each rank's container log (docker's json-file driver) rotates once it reaches LOG_MAX_SIZE, keeping LOG_MAX_FILE files:
+# the engine writes an access line for every response, so a monitoring poll grew it for as long as the container ran
+# (issue #49). stop.sh saves what docker kept. LOG_MAX_SIZE= (empty) leaves the docker daemon's own log settings.
+LOG_MAX_SIZE="${LOG_MAX_SIZE-100m}"
+LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
 HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 # Rank 0 can read the checkpoint over NFS too, from HEAD_NFS_SERVER (an address of the NFS server that reaches this Spark),
 # through a docker volume HEAD_NFS_VOLUME that start.sh creates here (the docker daemon mounts it: no root, and it survives a
@@ -187,9 +215,11 @@ HEAD_NFS_VOLUME="${HEAD_NFS_VOLUME:-dsv41-hf-head}"
 # A Spark's GPU shares its 121 GiB with the host: a rank that takes it all does not fail cleanly, the machine freezes and has
 # to be power-cycled. Two guards:
 #  - MIN_AVAIL_GIB: start.sh refuses to start unless each Spark has this much memory available (the weights, 98.9 GiB, plus
-#    the engine's own 12.2 GiB reserve). 0 turns the check off. MIN_AVAIL_WAIT_S: it re-reads the memory for up to this many
-#    seconds before refusing, because the page cache a build or a large copy just left is counted as available only as it is
-#    written back (0 reads once).
+#    the engine's own 12.2 GiB reserve). 0 turns the check off. Available is MemAvailable plus the pages parked on the
+#    kernel's per-CPU free lists beyond their resting level, as the engine's startup budget counts it (GLM 0119;
+#    scripts/memavail.sh): a docker save | load or an image build leaves several GiB there for a minute or two.
+#    MIN_AVAIL_WAIT_S: it re-reads the memory for up to this many seconds before refusing (0 reads once): the page cache a
+#    build or a large copy just left is counted as available only as it is written back, and parked pages drain (120).
 #  - MEMGUARD_GIB: scripts/memguard.sh runs on both Sparks while the server is up and kills the rank's container when the
 #    memory available stays under this floor for MEMGUARD_HOLD_S seconds without coming back over it (GiB, decimals allowed:
 #    2.5; 0 turns the guard off), or at once when it falls under MEMGUARD_HARD_GIB. A long prompt's workspace takes a few GiB
@@ -197,10 +227,16 @@ HEAD_NFS_VOLUME="${HEAD_NFS_VOLUME:-dsv41-hf-head}"
 # Do not lower TENSORFOLD_MEMORY_RESERVE_GIB to make the weights fit: the engine then takes the reserve too (a rank 0 with a
 # 10 GiB reserve froze its Spark).
 MIN_AVAIL_GIB="${MIN_AVAIL_GIB:-112}"
-MIN_AVAIL_WAIT_S="${MIN_AVAIL_WAIT_S:-30}"
+MIN_AVAIL_WAIT_S="${MIN_AVAIL_WAIT_S:-120}"
 MEMGUARD_GIB="${MEMGUARD_GIB:-2.5}"
 MEMGUARD_HOLD_S="${MEMGUARD_HOLD_S:-4}"
 MEMGUARD_HARD_GIB="${MEMGUARD_HARD_GIB:-1}"
+
+# ---------------------------------------------------------------- the ported features (off by default: spill v2, KV sharding)
+# Spill v2 (SPILL_GIB, SPILL_DIR, WORKER_SPILL_DIR, SPILL_FLOOR_GIB, SPILL_QUOTA_GIB), KV sharding (KV_SHARD,
+# KV_SHARD_DECODE; it builds on POOL above): defaults, checks and their mapping to the engine's flags and variables in
+# scripts/port.sh (docs/PORT-RECIPE.md).
+source "$_cfg_root/scripts/port.sh"
 
 # Colours only on a terminal.
 _c() { [[ -t "$1" ]] && printf '\033[%sm' "$2" || true; }
@@ -210,11 +246,12 @@ die()  { printf '%s[%s] ERROR:%s %s\n' "$(_c 2 '1;31')" "$(basename "$0")" "$(_c
 
 [[ -z "${HF_TOKEN:-}" ]] || export HF_TOKEN
 ablit_notice() {
+  [[ "$EAQ_V1_1" =~ ^[01]$ ]] || die "EAQ_V1_1 is 0 or 1, not $EAQ_V1_1"
   [[ "$ABLIT" =~ ^[01]$ ]] || die "ABLIT is 0 or 1, not $ABLIT"
   [[ "$ABLIT" == 1 ]] || return 0
   case "$MODEL_ID" in
     Mia-AiLab/DeepSeek-V4.1-Flash-1017-EAQ-v1-2.9-bpw|Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw) ;;
-    *) die "ABLIT=1 requires the Mia EAQ v1 2.9 bpw checkpoint and its matching $ABLIT_SIDECAR overlay" ;;
+    *) die "ABLIT=1 requires the Mia EAQ v1 2.9 bpw checkpoint and its matching $ABLIT_SIDECAR overlay (EAQ_V1_1=0)" ;;
   esac
   [[ "$ABLIT_REVISION" =~ ^[0-9a-f]{40}$ ]] || die "ABLIT_REVISION must be a full Hugging Face commit hash"
   warn "ABLIT=1: $ABLIT_ID is gated. You must have access at https://huggingface.co/$ABLIT_ID (accept its terms while logged in) and use your Hugging Face read token: export HF_TOKEN=hf_... or hf auth login. The token's account must have access to this repository."
