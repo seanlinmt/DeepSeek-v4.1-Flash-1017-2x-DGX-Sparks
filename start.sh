@@ -20,7 +20,7 @@
 # Setup: WORKER (an ssh target, key-based) in scripts/local.sh.
 # Settings, from the environment, scripts/local.sh or ./.env (defaults and their notes in scripts/config.sh):
 #   serving  CONTEXT, POOL, PARALLEL, ROUND_ROWS, MAX_TOKENS, THINKING, REASONING_EFFORT, THINKING_BUDGET, TEMPERATURE, TOP_P, TOP_K, DRAFTS,
-#            SERVED_NAME, HOST, PORT, RDMA, RDMA_IDLE_S, RDMA_NAP_US, GRAPHS, SIDE, PREFETCH, ENGRAM_AIO, REPLAY_FLOOR
+#            SERVED_NAME, SERVED_ALIAS, HOST, PORT, RDMA, RDMA_IDLE_S, RDMA_NAP_US, GRAPHS, SIDE, PREFETCH, ENGRAM_AIO, REPLAY_FLOOR
 #   nodes    WORKER, FABRIC_PEER, MASTER_ADDR, MASTER_PORT, SOCKET_IFNAME, NCCL_RAILS, NCCL_DEBUG
 #   files    ABLIT (0 | 1), ABLIT_REVISION, MODEL_ID, MODEL_REVISION, ENGRAM_ID, ENGRAM_REVISION, HF_CACHE, NFS_PATH, NFS_SERVER, NFS_VOLUME,
 #            WORKER_ENGRAM_DIR, WORKER_CACHE_DIR, STATE_DIR, LOG_DIR, LOG_KEEP
@@ -66,6 +66,11 @@ check_workers
 # rank 0's command (its serve flags need no link): built first, so the flags can be checked before anything is stopped
 SERVE=(tensorfold-native serve "$(served_in_container)" --backend cuda --host "$HOST" --port "$PORT" --name "$SERVED_NAME"
        --context "$CONTEXT" --parallel "$PARALLEL" --max-tokens "$MAX_TOKENS" --temperature "$TEMPERATURE" --top-p "$TOP_P" --top-k "$TOP_K")
+if [[ -n "$SERVED_ALIAS" ]]; then
+  for a in $SERVED_ALIAS; do
+    SERVE+=(--alias "$a")
+  done
+fi
 if [[ "$THINKING" == 1 ]]; then SERVE+=(--thinking); else SERVE+=(--no-thinking); fi
 [[ -z "$REASONING_EFFORT" ]] || SERVE+=(--reasoning-effort "$REASONING_EFFORT")
 [[ -z "$THINKING_BUDGET" ]] || SERVE+=(--thinking-budget "$THINKING_BUDGET")
@@ -298,7 +303,7 @@ IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [[ "$HOST" == 0.0.0.0 || "$HOST" == "::" ]] || IP="$HOST"
 printf '\n%s  ✔ %s is now LIVE! on port %s%s\n\n' "$G" "$SERVED_NAME" "$PORT" "$R"
 cat <<EOF
-    API      http://${IP:-<spark-address>}:$PORT/v1   (model: $SERVED_NAME)
+    API      http://${IP:-<spark-address>}:$PORT/v1   (model: $SERVED_NAME${SERVED_ALIAS:+, alias: $SERVED_ALIAS})
     Access   $( [[ "$API_KEY" == 1 ]] && echo "API key required: Authorization: Bearer \$(cat $API_KEY_FILE)" || echo "open: no key, anyone who reaches port $PORT can use it (API_KEY=1 requires one)")
     Window   $CONTEXT tokens · $PARALLEL at once · EXL3 2.9 bpw · drafts $( [[ "$DRAFTS" == 1 ]] && echo on || echo off) · images on
     Logs     docker logs -f $CONTAINER_NAME   (rank 1: ssh $(worker_host 1) docker logs -f $CONTAINER_NAME)

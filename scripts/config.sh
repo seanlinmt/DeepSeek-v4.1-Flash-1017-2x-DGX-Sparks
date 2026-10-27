@@ -26,6 +26,7 @@ if [[ -f "$_cfg_root/.env" ]]; then
   done < "$_cfg_root/.env"
 fi
 unset _n _line _key _value
+export PATH="$HOME/.local/bin:$PATH"
 
 # ---------------------------------------------------------------- the two Sparks
 # This machine serves rank 0 and the API; WORKER (an ssh target, key-based) is rank 1. The two are cabled directly
@@ -95,7 +96,8 @@ prebuilt_image() {
 CONTAINER_NAME="${CONTAINER_NAME:-dsv41-1017-exl3-tf}"   # the same name on both Sparks
 
 # ---------------------------------------------------------------- serving
-SERVED_NAME="${SERVED_NAME:-DeepSeek-V4.1-Flash-1017}"
+SERVED_NAME="${SERVED_NAME:-deepseek-v4.1-flash}"
+SERVED_ALIAS="${SERVED_ALIAS:-${ALIAS:-DeepSeek-V4.1-Flash-1017 deepseek-flash}}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8888}"
 # A request's positions at most (prompt and reply). The model's window is 1,048,576 tokens. The streams share a pool of
@@ -238,7 +240,7 @@ served_in_container() { echo "/hf/$DATA_SUB/model"; }
 PREPARED_MARKER="$STATE_DIR/prepared"
 prepared_state() {
   echo "model=$MODEL_ID@$(snapshot_rev) engram=$ENGRAM_ID@$(engram_rev) image=$(image_ident "$IMAGE") kit=$KIT_REF" \
-       "w=$(worker_host 1) wengram=$WORKER_ENGRAM_DIR wcache=$WORKER_CACHE_DIR ablit=$ABLIT" \
+       "w=$(worker_host 1) hengram=$HEAD_ENGRAM_DIR wengram=$WORKER_ENGRAM_DIR wcache=$WORKER_CACHE_DIR ablit=$ABLIT" \
        "overlay=$( [[ "$ABLIT" == 1 ]] && echo "$ABLIT_ID@$ABLIT_REVISION+stock-dtypes" || echo none)"
 }
 

@@ -324,7 +324,7 @@ Settings come from the environment, `scripts/local.sh` or `.env`; the defaults a
 | `TF_DS_ENGRAM_LANES`, `TF_DS_IDX_SPLIT` | unset (the indexer split from token 131,072) | the engine patches' switches (`zig/patches/`, see Status); a `TF_DS_*` variable you export goes to both ranks |
 | `RANK1_PROFILE` | empty | `1` or `2` starts rank 1 with `--profile`, which prints its prefill phase timings when rank 0 stops first (adds a sync per chunk: for attribution, not for timing) |
 | `API_KEY` | 0 | `1` makes rank 0 require a key (`Authorization: Bearer`; generated in `$STATE_DIR/api-key`, mode 600). The API is open on the network by default |
-| `HOST`, `PORT`, `SERVED_NAME` | 0.0.0.0, 8888, `DeepSeek-V4.1-Flash-1017` | |
+| `HOST`, `PORT`, `SERVED_NAME`, `SERVED_ALIAS` | 0.0.0.0, 8888, `deepseek-v4.1-flash`, `DeepSeek-V4.1-Flash-1017` | |
 | `WORKER`, `FABRIC_PEER`, `NFS_*` | | see Requirements |
 | `TF_REF`, `INPUTS_REF`, `KIT_REF` | pinned | the engine, the inputs' tools and the kit (changing one rebuilds or re-checks) |
 | `PULL` | 1 | `0` never pulls a published image (`GHCR_IMAGE`, `IMAGE_TAG`, `IMAGE_DIGEST`; the image of these pins is `ghcr.io/miaai-lab/deepseek-v4.1-flash-1017-2x-dgx-sparks-tensorfold:exl3-tp2-7c9bf5d36350`) |

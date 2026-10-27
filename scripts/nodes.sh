@@ -76,6 +76,7 @@ worker_hf_cache() {
 # in a throwaway container on worker i with the volume at /hf.
 nfs_server() { local s; s=$(wval NFS_SERVER "$1"); echo "${s:-${LINK_HEAD_ADDR[$1]:-}}"; }
 ensure_nfs_volume() {
+  [[ "$NFS_VOLUME" != /* ]] || return 0
   local i=$1 server have h
   server=$(nfs_server "$i"); h=$(worker_host "$i")
   [[ -n "$server" ]] || die "no NFS server address for $h: set $(wvar NFS_SERVER "$i") to the head's address on that worker's link"
