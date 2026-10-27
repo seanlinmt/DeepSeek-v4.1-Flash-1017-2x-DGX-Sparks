@@ -117,40 +117,55 @@ avail=$(df -B1 --output=avail "$HF_CACHE" | tail -1)
 # A checkpoint that is not in the cache under MODEL_ID's name and revision is downloaded whole (196 GiB). The cache is keyed by the
 # repo's name, so a copy downloaded under another name (the repo was renamed from ...-1017-EAQ-v1-2.9-bpw to ...-1017-EXL3-EAQ-v1-2.9-bpw) or
 # another revision does not count: refuse here when the disk cannot hold it, instead of filling the disk half way (README, Status)
-if [[ ! -f "$(model_cache_dir)/snapshots/$(snapshot_rev)/model.safetensors.index.json" ]]; then
-  (( avail > 215 * 1024 ** 3 )) || die "$MODEL_ID @ $(snapshot_rev | cut -c1-8) is not in $HF_CACHE/hub yet and only $(( avail / 1024 ** 3 )) GiB are free there; it is 196 GiB. If you already have this checkpoint under another repo name or revision, set MODEL_ID and MODEL_REVISION in scripts/local.sh to what $HF_CACHE/hub holds (scripts/local.sh.example); otherwise free the disk"
-  (( avail > 420 * 1024 ** 3 )) ||
-    warn "$(( avail / 1024 ** 3 )) GiB free in $HF_CACHE: the checkpoint (196 GiB), Engram's tables (203 GB) and rank 0's weight file (~106 GB) need ~505 GB"
-fi
-if [[ ! -f "$(model_cache_dir)/snapshots/$(snapshot_rev)/model.safetensors.index.json" ]]; then
-  log "Downloading $MODEL_ID${MODEL_REVISION:+ @ ${MODEL_REVISION:0:8}} into $HF_CACHE/hub (196 GiB the first time; resumes)"
-  if ! hf download "$MODEL_ID" ${MODEL_REVISION:+--revision "$MODEL_REVISION"} --cache-dir "$HF_CACHE/hub" >/dev/null; then
-    [[ -n "$MODEL_REVISION" && -f "$(model_cache_dir)/snapshots/$MODEL_REVISION/model.safetensors.index.json" ]] ||
-      die "$MODEL_ID: the download failed"
-    warn "$MODEL_ID: could not reach Hugging Face; using the snapshot already here"
-  fi
+if [[ "$ABLIT" == 1 && -f "$DATA_DIR/checkpoint/.ablit-ready" ]]; then
+  SNAP="$DATA_DIR/checkpoint"
+  log "Checkpoint: $SNAP (already prepared abliterated checkpoint)"
 else
-  log "Checkpoint: $(model_cache_dir)/snapshots/$(snapshot_rev) already here"
+  if [[ ! -f "$(model_cache_dir)/snapshots/$(snapshot_rev)/model.safetensors.index.json" ]]; then
+    (( avail > 215 * 1024 ** 3 )) || die "$MODEL_ID @ $(snapshot_rev | cut -c1-8) is not in $HF_CACHE/hub yet and only $(( avail / 1024 ** 3 )) GiB are free there; it is 196 GiB. If you already have this checkpoint under another repo name or revision, set MODEL_ID and MODEL_REVISION in scripts/local.sh to what $HF_CACHE/hub holds (scripts/local.sh.example); otherwise free the disk"
+    (( avail > 420 * 1024 ** 3 )) ||
+      warn "$(( avail / 1024 ** 3 )) GiB free in $HF_CACHE: the checkpoint (196 GiB), Engram's tables (203 GB) and rank 0's weight file (~106 GB) need ~505 GB"
+    log "Downloading $MODEL_ID${MODEL_REVISION:+ @ ${MODEL_REVISION:0:8}} into $HF_CACHE/hub (196 GiB the first time; resumes)"
+    if ! hf download "$MODEL_ID" ${MODEL_REVISION:+--revision "$MODEL_REVISION"} --cache-dir "$HF_CACHE/hub" >/dev/null; then
+      [[ -n "$MODEL_REVISION" && -f "$(model_cache_dir)/snapshots/$MODEL_REVISION/model.safetensors.index.json" ]] ||
+        die "$MODEL_ID: the download failed"
+      warn "$MODEL_ID: could not reach Hugging Face; using the snapshot already here"
+    fi
+  else
+    log "Checkpoint: $(model_cache_dir)/snapshots/$(snapshot_rev) already here"
+  fi
+  SNAP="$(model_cache_dir)/snapshots/$(snapshot_rev)"
 fi
-SNAP="$(model_cache_dir)/snapshots/$(snapshot_rev)"
 [[ -f "$SNAP/model.safetensors.index.json" ]] || die "$MODEL_ID: no complete snapshot at $SNAP"
 log "Checkpoint: $SNAP ($(du -shL "$SNAP" | cut -f1))"
 shards=($ENGRAM_SHARDS)
 inc=(--include model.safetensors.index.json --include config.json); for f in "${shards[@]}"; do inc+=(--include "$f"); done
 have_engram=1
-for f in model.safetensors.index.json config.json "${shards[@]}"; do
-  [[ -s "$(engram_cache_dir)/snapshots/$(engram_rev)/$f" ]] || have_engram=0
-done
-if [[ $have_engram -eq 0 ]]; then
-  log "Downloading Engram's tables: ${ENGRAM_SHARDS// /, } of $ENGRAM_ID${ENGRAM_REVISION:+ @ ${ENGRAM_REVISION:0:8}} (~203 GB the first time; resumes)"
-  if ! hf download "$ENGRAM_ID" ${ENGRAM_REVISION:+--revision "$ENGRAM_REVISION"} --cache-dir "$HF_CACHE/hub" "${inc[@]}" >/dev/null; then
-    [[ -n "$ENGRAM_REVISION" ]] || die "$ENGRAM_ID: the download failed"
-    warn "$ENGRAM_ID: could not reach Hugging Face; using the files already here"
+if [[ -n "$HEAD_ENGRAM_DIR" ]]; then
+  for f in model.safetensors.index.json config.json "${shards[@]}"; do
+    [[ -s "$HEAD_ENGRAM_DIR/$f" ]] || have_engram=0
+  done
+  if [[ $have_engram -eq 1 ]]; then
+    ESNAP="$HEAD_ENGRAM_DIR"
+    log "Engram: $ESNAP already on local disk"
   fi
-else
-  log "Engram: $(engram_cache_dir)/snapshots/$(engram_rev) already here"
 fi
-ESNAP="$(engram_cache_dir)/snapshots/$(engram_rev)"
+if [[ -z "${ESNAP:-}" ]]; then
+  have_engram=1
+  for f in model.safetensors.index.json config.json "${shards[@]}"; do
+    [[ -s "$(engram_cache_dir)/snapshots/$(engram_rev)/$f" ]] || have_engram=0
+  done
+  if [[ $have_engram -eq 0 ]]; then
+    log "Downloading Engram's tables: ${ENGRAM_SHARDS// /, } of $ENGRAM_ID${ENGRAM_REVISION:+ @ ${ENGRAM_REVISION:0:8}} (~203 GB the first time; resumes)"
+    if ! hf download "$ENGRAM_ID" ${ENGRAM_REVISION:+--revision "$ENGRAM_REVISION"} --cache-dir "$HF_CACHE/hub" "${inc[@]}" >/dev/null; then
+      [[ -n "$ENGRAM_REVISION" ]] || die "$ENGRAM_ID: the download failed"
+      warn "$ENGRAM_ID: could not reach Hugging Face; using the files already here"
+    fi
+  else
+    log "Engram: $(engram_cache_dir)/snapshots/$(engram_rev) already here"
+  fi
+  ESNAP="$(engram_cache_dir)/snapshots/$(engram_rev)"
+fi
 # the 1017 tables are new: the shards of the older release must not be used (the card lists these sizes and sha256)
 declare -A want_size=([model-00047-of-00048.safetensors]=101535150936 [model-00048-of-00048.safetensors]=101537926640)
 declare -A want_sha=([model-00047-of-00048.safetensors]=76a05106ece259be83d1bfea0dcb54f23377864ee60fd321690f35e6698a2af5
@@ -275,25 +290,31 @@ fi
 # the served folder: every file of the snapshot as a relative link (it resolves under /hf in a container too), and the
 # recipe's chat template
 VIEW="$DATA_DIR/model"
-rm -rf "$VIEW.new" && mkdir -p "$VIEW.new"
-for f in "$SNAP"/*; do ln -s "$(realpath -s --relative-to="$VIEW.new" "$f")" "$VIEW.new/"; done
-# Never copy through a snapshot's chat-template symlink into stock or grafted weights.
-rm -f "$VIEW.new/chat_template.jinja"
-cp model/chat_template.jinja "$VIEW.new/chat_template.jinja"
-rm -rf "$VIEW" && mv "$VIEW.new" "$VIEW"
+if [[ ! -s "$VIEW/config.json" ]]; then
+  rm -rf "$VIEW.new" && mkdir -p "$VIEW.new"
+  for f in "$SNAP"/*; do ln -s "$(realpath -s --relative-to="$VIEW.new" "$f")" "$VIEW.new/"; done
+  # Never copy through a snapshot's chat-template symlink into stock or grafted weights.
+  rm -f "$VIEW.new/chat_template.jinja"
+  cp model/chat_template.jinja "$VIEW.new/chat_template.jinja"
+  rm -rf "$VIEW" && mv "$VIEW.new" "$VIEW"
+fi
 [[ -s "$VIEW/config.json" ]] || die "the served folder $VIEW does not reach the checkpoint"
 log "Served folder: $VIEW (the checkpoint linked, the recipe's chat template)"
 
 # ---------------------------------------------------------------- 6. the worker's NFS volume
+manifest_paths=()
+[[ -d "$HF_CACHE/hub/models--${MODEL_ID//\//--}/snapshots/$(snapshot_rev)" ]] && manifest_paths+=("hub/models--${MODEL_ID//\//--}/snapshots/$(snapshot_rev)")
+[[ -d "$HF_CACHE/hub/models--${ENGRAM_ID//\//--}/snapshots/$(engram_rev)" ]] && manifest_paths+=("hub/models--${ENGRAM_ID//\//--}/snapshots/$(engram_rev)")
+[[ -d "$HF_CACHE/$DATA_SUB" ]] && manifest_paths+=("$DATA_SUB")
+[[ -d "$HF_CACHE/$KIT_SUB/kit" ]] && manifest_paths+=("$KIT_SUB/kit")
+
 manifest() {  # the files a rank reads, with their sizes, as paths under HF_CACHE
-  (cd "$HF_CACHE" && find -L "hub/models--${MODEL_ID//\//--}/snapshots/$(snapshot_rev)" \
-     "hub/models--${ENGRAM_ID//\//--}/snapshots/$(engram_rev)" "$DATA_SUB" "$KIT_SUB/kit" \
-     -path '*/.git' -prune -o -type f -printf '%p %s\n' | LC_ALL=C sort)
+  (cd "$HF_CACHE" && find -L "${manifest_paths[@]}" -path '*/.git' -prune -o -type f -printf '%p %s\n' | LC_ALL=C sort)
 }
 want=$(manifest)
 ensure_nfs_volume 1
 worker_files_check 1
-have=$(worker 1 "docker run --rm --network none -v '$NFS_VOLUME:/hf:ro' -w /hf --entrypoint find '$IMAGE' -L 'hub/models--${MODEL_ID//\//--}/snapshots/$(snapshot_rev)' 'hub/models--${ENGRAM_ID//\//--}/snapshots/$(engram_rev)' '$DATA_SUB' '$KIT_SUB/kit' -path '*/.git' -prune -o -type f -printf '%p %s\n'" 2>/dev/null | LC_ALL=C sort || true)
+have=$(worker 1 "docker run --rm --network none -v '$NFS_VOLUME:/hf:ro' -w /hf --entrypoint find '$IMAGE' -L ${manifest_paths[*]} -path '*/.git' -prune -o -type f -printf '%p %s\n'" 2>/dev/null | LC_ALL=C sort || true)
 [[ "$have" == "$want" ]] || { diff <(printf '%s\n' "$want") <(printf '%s\n' "$have") | head -10 >&2
   die "$(worker_host 1) does not see every file over NFS ($NFS_VOLUME)"; }
 log "Worker ($(worker_host 1)) reads the checkpoint, the kit and rank 0's files over NFS"
