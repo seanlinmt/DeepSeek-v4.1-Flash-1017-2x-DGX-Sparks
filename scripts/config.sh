@@ -199,7 +199,7 @@ LOG_KEEP="${LOG_KEEP:-10}"
 # (issue #49). stop.sh saves what docker kept. LOG_MAX_SIZE= (empty) leaves the docker daemon's own log settings.
 LOG_MAX_SIZE="${LOG_MAX_SIZE-100m}"
 LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
-HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 # Rank 0 can read the checkpoint over NFS too, from HEAD_NFS_SERVER (an address of the NFS server that reaches this Spark),
 # through a docker volume HEAD_NFS_VOLUME that start.sh creates here (the docker daemon mounts it: no root, and it survives a
 # reboot). Empty: rank 0 reads HF_CACHE as a host path. Not sshfs: it reports every file as type "unknown", which the engine

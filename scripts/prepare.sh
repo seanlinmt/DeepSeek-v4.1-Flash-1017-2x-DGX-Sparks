@@ -42,11 +42,20 @@ flock -n 9 || die "another prepare.sh is already running; wait for it or stop it
 # Check gated access before building images or downloading hundreds of GB. hf uses HF_TOKEN or its saved login;
 # never pass the token as an argument or forward it to the worker or serving containers.
 if [[ "$ABLIT" == 1 ]]; then
-  command -v hf >/dev/null || die "install the Hugging Face CLI: pip install -U huggingface_hub"
-  log "Downloading the matching Mia 2.9 bpw overlay from $ABLIT_ID @ ${ABLIT_REVISION:0:8}"
-  hf download "$ABLIT_ID" --revision "$ABLIT_REVISION" --cache-dir "$HF_CACHE/hub" \
-    --include apply_mia29_wo_b_graft.py --include "$ABLIT_SIDECAR" --include EXL3_MIA29_ABLIT_META.json --include README.md >/dev/null || \
-    die "cannot download the gated overlay: use your HF read token (HF_TOKEN or hf auth login) and obtain access at https://huggingface.co/$ABLIT_ID"
+  overlay_sub="hub/models--${ABLIT_ID//\//--}/snapshots/$ABLIT_REVISION"
+  have_overlay=1
+  for f in apply_mia29_wo_b_graft.py "$ABLIT_SIDECAR" EXL3_MIA29_ABLIT_META.json; do
+    [[ -s "$HF_CACHE/$overlay_sub/$f" ]] || have_overlay=0
+  done
+  if [[ $have_overlay -eq 0 ]]; then
+    command -v hf >/dev/null || die "install the Hugging Face CLI: pip install -U huggingface_hub"
+    log "Downloading the matching Mia 2.9 bpw overlay from $ABLIT_ID @ ${ABLIT_REVISION:0:8}"
+    hf download "$ABLIT_ID" --revision "$ABLIT_REVISION" --cache-dir "$HF_CACHE/hub" \
+      --include apply_mia29_wo_b_graft.py --include "$ABLIT_SIDECAR" --include EXL3_MIA29_ABLIT_META.json --include README.md >/dev/null || \
+      die "cannot download the gated overlay: use your HF read token (HF_TOKEN or hf auth login) and obtain access at https://huggingface.co/$ABLIT_ID"
+  else
+    log "Overlay: $HF_CACHE/$overlay_sub already here"
+  fi
 fi
 log "Preflight checks on both Sparks"
 command -v docker >/dev/null || die "docker is not installed"
@@ -113,21 +122,33 @@ if [[ ! -f "$(model_cache_dir)/snapshots/$(snapshot_rev)/model.safetensors.index
   (( avail > 420 * 1024 ** 3 )) ||
     warn "$(( avail / 1024 ** 3 )) GiB free in $HF_CACHE: the checkpoint (196 GiB), Engram's tables (203 GB) and rank 0's weight file (~106 GB) need ~505 GB"
 fi
-log "Downloading $MODEL_ID${MODEL_REVISION:+ @ ${MODEL_REVISION:0:8}} into $HF_CACHE/hub (196 GiB the first time; resumes)"
-if ! hf download "$MODEL_ID" ${MODEL_REVISION:+--revision "$MODEL_REVISION"} --cache-dir "$HF_CACHE/hub" >/dev/null; then
-  [[ -n "$MODEL_REVISION" && -f "$(model_cache_dir)/snapshots/$MODEL_REVISION/model.safetensors.index.json" ]] ||
-    die "$MODEL_ID: the download failed"
-  warn "$MODEL_ID: could not reach Hugging Face; using the snapshot already here"
+if [[ ! -f "$(model_cache_dir)/snapshots/$(snapshot_rev)/model.safetensors.index.json" ]]; then
+  log "Downloading $MODEL_ID${MODEL_REVISION:+ @ ${MODEL_REVISION:0:8}} into $HF_CACHE/hub (196 GiB the first time; resumes)"
+  if ! hf download "$MODEL_ID" ${MODEL_REVISION:+--revision "$MODEL_REVISION"} --cache-dir "$HF_CACHE/hub" >/dev/null; then
+    [[ -n "$MODEL_REVISION" && -f "$(model_cache_dir)/snapshots/$MODEL_REVISION/model.safetensors.index.json" ]] ||
+      die "$MODEL_ID: the download failed"
+    warn "$MODEL_ID: could not reach Hugging Face; using the snapshot already here"
+  fi
+else
+  log "Checkpoint: $(model_cache_dir)/snapshots/$(snapshot_rev) already here"
 fi
 SNAP="$(model_cache_dir)/snapshots/$(snapshot_rev)"
 [[ -f "$SNAP/model.safetensors.index.json" ]] || die "$MODEL_ID: no complete snapshot at $SNAP"
 log "Checkpoint: $SNAP ($(du -shL "$SNAP" | cut -f1))"
 shards=($ENGRAM_SHARDS)
 inc=(--include model.safetensors.index.json --include config.json); for f in "${shards[@]}"; do inc+=(--include "$f"); done
-log "Downloading Engram's tables: ${ENGRAM_SHARDS// /, } of $ENGRAM_ID${ENGRAM_REVISION:+ @ ${ENGRAM_REVISION:0:8}} (~203 GB the first time; resumes)"
-if ! hf download "$ENGRAM_ID" ${ENGRAM_REVISION:+--revision "$ENGRAM_REVISION"} --cache-dir "$HF_CACHE/hub" "${inc[@]}" >/dev/null; then
-  [[ -n "$ENGRAM_REVISION" ]] || die "$ENGRAM_ID: the download failed"
-  warn "$ENGRAM_ID: could not reach Hugging Face; using the files already here"
+have_engram=1
+for f in model.safetensors.index.json config.json "${shards[@]}"; do
+  [[ -s "$(engram_cache_dir)/snapshots/$(engram_rev)/$f" ]] || have_engram=0
+done
+if [[ $have_engram -eq 0 ]]; then
+  log "Downloading Engram's tables: ${ENGRAM_SHARDS// /, } of $ENGRAM_ID${ENGRAM_REVISION:+ @ ${ENGRAM_REVISION:0:8}} (~203 GB the first time; resumes)"
+  if ! hf download "$ENGRAM_ID" ${ENGRAM_REVISION:+--revision "$ENGRAM_REVISION"} --cache-dir "$HF_CACHE/hub" "${inc[@]}" >/dev/null; then
+    [[ -n "$ENGRAM_REVISION" ]] || die "$ENGRAM_ID: the download failed"
+    warn "$ENGRAM_ID: could not reach Hugging Face; using the files already here"
+  fi
+else
+  log "Engram: $(engram_cache_dir)/snapshots/$(engram_rev) already here"
 fi
 ESNAP="$(engram_cache_dir)/snapshots/$(engram_rev)"
 # the 1017 tables are new: the shards of the older release must not be used (the card lists these sizes and sha256)
