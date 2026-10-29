@@ -2,271 +2,306 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Enforce `response_format`/grammar-constrained decoding in the dsv41 TensorFold engine on the two-Spark pair, so a request's reply cannot leave its schema.
+**Goal:** Enforce `response_format`/grammar-constrained decoding in the dsv41 TensorFold engine on the two-Spark pair.
 
-**Architecture:** xgrammar 0.2.2, pinned by git SHA and built with the image's g++/libstdc++, behind a ~400-LOC `extern "C"` shim; a Zig-side compile cache and matcher lifecycle in `core/structure.zig`; per-stream state in the dsv41 family; the mask applied on-device to the full logits row inside the captured decode stretch (per-lane bitmask buffer + per-row enable flag); rank 0 owns the matcher and ships rank 1 its vocabulary slice over the RDMA ring.
+**Architecture:** xgrammar v0.2.2 (pinned `4d145cc…`) built with the image's g++/libstdc++ behind a POD-only C shim in `core/structure/`; a mutexed compile cache in `core/structure.zig`; compile at admission on worker threads with the handle carried on `Request.structure`; per-stream matcher state in the dsv41 family; the mask applied by a `.cu` kernel after the graph launch and before `sampleDev`; rank 0 owns the matcher and ships rank 1 its vocabulary slice over the RDMA ring.
 
-**Tech Stack:** Zig 0.17.0, CUDA 13 (sm_121a), C++ (g++/libstdc++), xgrammar 0.2.2, Docker image built by `scripts/prepare.sh`.
+**Tech Stack:** Zig 0.17.0, CUDA 13 (sm_121a), C++17 (g++/libstdc++), xgrammar v0.2.2, Docker image built by `scripts/prepare.sh`.
 
-**Spec:** `docs/STRUCTURED-OUTPUT.md` (rev 2, commit `4994774`) — read it with this plan; every value here is copied from it.
+**Spec:** `docs/STRUCTURED-OUTPUT.md` rev 3 — read it with this plan.
 
 ## Global Constraints
 
-- Zig 0.17.0 only; no new runtime dependencies beyond xgrammar 0.2.2 pinned by full SHA.
-- Both C++ components build with the image's g++ against libstdc++; the engine's final link adds libstdc++ and **does not** call `linkLibCpp`.
-- `vocab_type = RAW` (bytes are already decoded; a byte-level type would decode twice).
-- JSON/JSON-Schema compile with compact whitespace (`any_whitespace=false`, verified against the 0.2.2 headers) and a root leading `\s*`.
-- `strict_mode=true` always; a client's `strict:false` is ignored and documented.
-- Cache key is **(kind, full text)**, text compared on hash hit; byte-bounded (`TF_DS_SO_CACHE_BYTES`, default 268435456, 0 = off); the library's own cache stays off.
-- Compiles run on worker threads, never on the lane thread; `TF_DS_SO_COMPILE_THREADS` default 2; `TF_DS_SO_TIMEOUT_S` default 20 → 400 at admission.
-- Constrained streams never draft; every other stream keeps DSpark drafts.
-- Matcher lives on rank 0 only; rank 1 receives its vocabulary slice of the bitmask over the RDMA ring and never initializes xgrammar.
-- `TF_DS_SO=0` at boot leaves `Info.structures` false and the old 400 behaviour.
-- The patch lands as `zig/patches/0034-structured-output.patch`, applied after `0033` in filename order, and must `git apply --check` on a clean `TF_REF` after `0001`–`0033`.
-- The image is built only by `scripts/prepare.sh`; host tests run with `zig build test` (shim tests need `-Dxgrammar=<prefix>`).
-- Spec line references are for a clean pre-patch `TF_REF`; locate by symbol, not line.
+- xgrammar pinned at commit `4d145cc13d878c751ebeed36af1c013074be76bc`; CMake `-DXGRAMMAR_BUILD_PYTHON_BINDINGS=OFF`, `-DCMAKE_BUILD_TYPE=Release`, clone `--recursive` (dlpack).
+- Both C++ components build with the image's **g++/libstdc++**; the engine links libstdc++ and libgcc, never libc++ (`linkLibCpp` off). The shim is compiled by a **system `g++ -c` + `ar` step**, not `addCSourceFile`.
+- `vocab_type = RAW`; only the real vocab is passed, padded size as `vocab_size`; every special token is exported with empty bytes.
+- `any_whitespace=false` for JSON/JSON-Schema; a bounded pre-grammar whitespace phase (≤ 4 characters) handles leading whitespace.
+- `strict_mode=true` always; `strict:false` accepted and ignored.
+- Cache key **(kind, full text)** with text compared on a hash hit; mutexed; in-flight compile dedupe; byte bound from `tfso_grammar_bytes`, `TF_DS_SO_CACHE_BYTES` default 268435456; library cache off.
+- Compiles run on worker threads only (`TF_DS_SO_COMPILE_THREADS` default 2), at admission; `TF_DS_SO_TIMEOUT_S` default 20 → `cx.refuse` before headers.
+- Constrained streams never draft and never share a round with drafted rows.
+- Matcher on rank 0 only; rank 1 receives a bit-shifted vocabulary slice over the RDMA ring, only in constrained rounds; rank 1 never initializes xgrammar.
+- `TF_DS_SO=0` → `Info.structures` false, old 400, old bits. `TF_DS_SO_FAULT=accept` injects a matcher failure.
+- Patch exported by `scripts/port-patches.sh` (squash) after a base commit of `TF_REF` + `0001`–`0033`; it must pass its own apply/equality checks.
+- Image built only by `scripts/prepare.sh`; host tests need `-Dxgrammar=<prefix>` and skip the shim tests without it.
+- Spec line references are for a clean pre-patch `TF_REF`; locate by symbol.
 
 ## Review Focus
 
-1. A model that emits `\n\n` after the think-close token before `{` — the grammar must accept it (not newline-until-length). Owned by Task 6 tests + Task 11 probe.
-2. A client sending `strict: false` — must be accepted and ignored, reply still schema-valid. Owned by Task 3 test + Task 11 probe.
-3. A Lark grammar or regex construct xgrammar cannot compile — must be a 400 with the compiler's message, never a crash or a hung admission. Owned by Task 3 test + Task 11 probe.
-4. A schema that cannot complete inside `max_tokens` — that request ends `length`/`failed`, the server and other streams stay healthy. Owned by Task 9 test + Task 11 probe.
-5. A cancel mid-decode on a constrained stream — matcher freed, no leak, no crash, other streams unaffected. Owned by Task 6 test + Task 11 probe.
+1. `\n\n` after the think-close token before `{` — accepted, not newline-until-length. Task 6 tests, Task 11 probe.
+2. `strict: false` — accepted and ignored, reply still valid. Task 3 test, Task 11 probe.
+3. An unsupported Lark grammar or regex construct — 400 with the compiler's message, never a crash or hung admission. Task 2 test, Task 11 probe.
+4. An unsatisfiable schema within `max_tokens` — that request ends `length`, server and other streams healthy; `TF_DS_SO_FAULT` covers the `failed` frame. Task 9 test, Task 11 probe.
+5. Cancel mid-decode on a constrained stream — matcher freed, no leak, others unaffected. Task 6 test, Task 11 probe.
 
 ---
 
 ## File Structure
 
-Engine checkout (`ai:~/repos/tensorfold-dsv41-dev`, `TF_REF` + `0001`–`0033` applied):
+Engine repo (`ai:~/repos/tensorfold-dsv41-dev`, branch `structured-output`):
 
-- `zig/src/families/dsv41/structure/tfso.h` — the shim's C declarations (new).
-- `zig/src/families/dsv41/structure/tfso.cc` — the shim implementation (new).
-- `zig/src/core/structure.zig` — cache, compile pool, kind→shim mapping (new).
-- `zig/src/families/dsv41/structure.zig` — vocab export, per-stream matcher registry, mask preparation (new).
-- `zig/src/families/dsv41/structure_mask.zig` — device buffer, flag, kernel wrapper (new).
-- `zig/src/families/dsv41/round.zig` — mask node in the captured stretch (modify).
-- `zig/src/families/dsv41/lanes.zig` — drafting exclusion (modify).
+- `zig/src/core/structure/tfso.h`, `tfso.cc` — the shim (new).
+- `zig/src/core/structure.zig` — cache, compile pool, kind mapping (new).
+- `zig/src/families/dsv41/structure.zig` — per-stream matcher, whitespace phase, vocab-export wiring (new).
+- `zig/src/families/dsv41/structure_mask.cu` — the mask kernel (new).
+- `zig/src/families/dsv41/layer_main.zig` — mask + matcher at the two `sampleDev` sites (modify).
 - `zig/src/families/dsv41/dsv41.zig` — `Info.structures` (modify).
-- `zig/src/server/chat.zig` — failure surfacing (modify).
-- `build.zig` — link shim/xgrammar/libstdc++, `-Dxgrammar` option (modify).
-- Tests: `zig/src/core/structure_test.zig`, `zig/src/families/dsv41/structure_test.zig` (new).
+- `zig/src/families/dsv41/lanes.zig` — drafting exclusion and mixed rounds (modify).
+- `zig/src/core/engine_api.zig` — `Structure.handle` (modify).
+- `zig/src/server/server.zig` — compile at admission (modify).
+- `zig/src/server/chat.zig` — scoped error frame (modify).
+- `build.zig` — `-Dxgrammar`, g++/ar step, link flags (modify).
+- Tests: `zig/src/core/structure_test.zig`, `zig/src/families/dsv41/structure_test.zig`, `tools/so_gpu_test.cpp` (GPU binary).
 
 Recipe repo (worktree `ai:~/repos/dsv41-structured-output`):
 
-- `zig/Dockerfile`, `scripts/config.sh`, `scripts/prepare.sh`, `zig/patches/README.md`, `zig/patches/0034-structured-output.patch`, `tools/structure_probe.py`.
+- `zig/Dockerfile`, `scripts/config.sh`, `scripts/prepare.sh`, `zig/patches/0034-structured-output.patch` (generated), `zig/patches/README.md` (generated row), `tools/structure_probe.py`.
 
 ---
 
-### Task 1: Verify xgrammar 0.2.2 builds standalone
+### Task 0: Base commit, toolchain, xgrammar build  [engine repo + host]
 
-**Files:**
-- Create: `ai:~/opt/xgrammar-0.2.2/` (build prefix), `docs/STRUCTURED-OUTPUT.md` decision note if the fallback is taken.
-
-**Interfaces:**
-- Produces: `~/opt/xgrammar-0.2.2/{include,lib/libxgrammar.a}` or the recorded decision to use llguidance.
-
-- [ ] **Step 1: Clone and build with the toolchain the image will use**
-
-Run: `git clone --recursive https://github.com/mlc-ai/xgrammar && git checkout 0.2.2 && cmake -B build -DXGRAMMAR_BUILD_PYTHON_LIB=OFF && cmake --build build -j`
-Expected: `libxgrammar.a` and `include/xgrammar/*.h` exist; no Python required.
-
-- [ ] **Step 2: Compile a smoke TU against the headers**
-
-Run: `g++ -std=c++17 -Iinclude smoke.cc lib/libxgrammar.a -o smoke && ./smoke`
-Expected: exit 0 after building a `TokenizerInfo` from a 3-token vocab and compiling `{"type":"object"}`.
-
-- [ ] **Step 3: Record the decision**
-
-If it builds, no spec change. If it does not, write one line into `docs/STRUCTURED-OUTPUT.md` §12 and switch every later task's shim body to llguidance's C API (same Zig-side design).
-
-- [ ] **Step 4: Commit (only if the spec changed)**
-
-```bash
-git add docs/STRUCTURED-OUTPUT.md && git commit -m "docs: xgrammar build verified | fallback to llguidance"
-```
-
-### Task 2: The shim
-
-**Files:**
-- Create: `zig/src/families/dsv41/structure/tfso.h`, `zig/src/families/dsv41/structure/tfso.cc`
-- Test: `zig/src/families/dsv41/structure_test.zig`
+**Files:** engine checkout `~/repos/tensorfold-dsv41-dev`; `~/opt/zig-0.17.0`; `~/opt/xgrammar-0.2.2`.
 
 **Interfaces:**
-- Produces: `tfso_init(const char* const* vocab_bytes, const int32_t* lens, int32_t n, int32_t vocab_type, int32_t padded_vocab, const int32_t* stops, int32_t nstops) -> void*`; `tfso_compile_json_schema(void*, const char*, int strict, int any_whitespace) -> void*`; `tfso_compile_regex(void*, const char*) -> void*`; `tfso_compile_grammar(void*, const char*) -> void*`; `tfso_matcher_create(void*, void*) -> void*`; `tfso_fill_bitmask(void*, int32_t*) -> int`; `tfso_accept_token(void*, int32_t) -> int`; `tfso_rollback(void*, int32_t) -> int`; `tfso_finished(void*) -> int`; `tfso_free_*`; every failing call writes a message into a caller buffer (`tfso_last_error(char*, int)`).
+- Produces: branch `structured-output` whose base commit tree equals `TF_REF` + `0001`–`0033`; a working `zig`; `~/opt/xgrammar-0.2.2/{include,lib/libxgrammar.a}`.
 
-- [ ] **Step 1: Write the failing test** — a fake 20-token vocab (ASCII bytes), `tfso_init` with `vocab_type=RAW`, then `tfso_compile_json_schema("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}}", 1, 0)`, a matcher, `tfso_fill_bitmask`; assert bit for token `{` is set and bit for a plain word token is clear.
+- [ ] **Step 1: Apply the hand-written patches and commit the base**
 
-- [ ] **Step 2: Run it** — `zig build test -Dxgrammar=$HOME/opt/xgrammar-0.2.2`; expect a compile error naming the missing `tfso_*` symbols.
+Run: `git checkout -B structured-output 629c524 && for p in ~/repos/dsv41-structured-output/zig/patches/*.patch; do git apply "$p"; done && git add -A && git commit -m "base: TF_REF + 0001-0033" && git tag so-base`
+Expected: one commit; `git status` clean.
 
-- [ ] **Step 3: Implement** `tfso.cc` — `TokenizerInfo` with the RAW type and padded size, `GrammarCompiler`, `GrammarMatcher`; `fill_bitmask` writes int32 words, bit 1 = allowed; errors are caught and copied into the error buffer, never thrown across the C boundary.
+- [ ] **Step 2: Install Zig 0.17.0 from the pinned tarball**
 
-- [ ] **Step 4: Run the test** — same command; expect PASS.
+Run: download `zig-aarch64-linux-0.17.0.tar.xz`, check sha256 against `scripts/config.sh`'s `ZIG_SHA256`, extract to `~/opt/zig-0.17.0`.
+Expected: `~/opt/zig-0.17.0/zig version` prints `0.17.0`.
 
-- [ ] **Step 5: Commit** — `git add zig/src/families/dsv41/structure zig/src/families/dsv41/structure_test.zig && git commit -m "feat(dsv41): xgrammar shim (tfso)"`
+- [ ] **Step 3: Build xgrammar standalone (the fallback decision point)**
 
-### Task 3: Core compile cache and kind mapping
+Run: `git clone --recursive https://github.com/mlc-ai/xgrammar && git checkout 4d145cc13d878c751ebeed36af1c013074be76bc && cmake -B build -DXGRAMMAR_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/opt/xgrammar-0.2.2 && cmake --build build -j && cmake --install build`
+Expected: `~/opt/xgrammar-0.2.2/lib/libxgrammar.a` exists.
 
-**Files:**
-- Create: `zig/src/core/structure.zig`, `zig/src/core/structure_test.zig`
-- Modify: `build.zig` (test module)
+- [ ] **Step 4: Smoke-compile against it**
 
-**Interfaces:**
-- Consumes: the `tfso_*` surface from Task 2.
-- Produces: `pub const Kind = enum { json, json_schema, regex, choice, grammar };` `pub const Cache = struct { pub fn init(a: Allocator, bytes: usize) Cache; pub fn get(self: *Cache, kind: Kind, text: []const u8) !?*Grammar; pub fn put(self: *Cache, kind: Kind, text: []const u8, g: *Grammar) !*Grammar; pub fn deinit(self: *Cache) void; };` `pub fn compileAsync(self: *Cache, kind: Kind, text: []const u8) !Job;` `pub fn wait(self: *Cache, job: Job, timeout_ms: u64) !*Grammar;` `pub fn choiceGrammar(a: Allocator, choices_json: []const u8) ![]const u8;`
+Run: `g++ -std=c++17 -I$HOME/opt/xgrammar-0.2.2/include smoke.cc -L$HOME/opt/xgrammar-0.2.2/lib -lxgrammar -o smoke && ./smoke`
+Expected: exit 0 after building a `TokenizerInfo` from 3 tokens and compiling `{"type":"object"}`.
 
-- [ ] **Step 1: Write the failing tests** — (a) two puts with the same hash but different text return different grammars; (b) a put past the byte bound evicts the least recently used; (c) cache 0 compiles per call; (d) `choiceGrammar("[\"a\",\"b\"]")` yields `root ::= "\"a\"" | "\"b\""` with escaped quotes; (e) an invalid schema yields an error carrying the compiler's message; (f) `wait` past the timeout yields `error.Timeout` while the worker keeps running.
+- [ ] **Step 5: Record the fallback if Step 3 failed**
 
-- [ ] **Step 2: Run** — `zig build test`; expect failures for missing declarations.
+If it did not build, add one line to spec §12 and switch every later task's shim body to llguidance's C API. Commit: `git commit -m "docs: xgrammar build verified | llguidance fallback"` (recipe repo).
 
-- [ ] **Step 3: Implement** — LRU map `(kind,text)` with stored text compared on hit; worker pool capped by `TF_DS_SO_COMPILE_THREADS` (default 2) reading the flag through the engine's config; compile calls mapped per kind (`json` → the object schema text with `any_whitespace=0`; `json_schema` → strict; `regex`; `grammar`; `choice` → the generated alternation).
-
-- [ ] **Step 4: Run** — expect PASS.
-
-- [ ] **Step 5: Commit** — `git commit -m "feat(core): structured-output compile cache and kind mapping"`
-
-### Task 4: Vocabulary export
+### Task 1: Shim and build wiring  [engine repo]
 
 **Files:**
-- Create: `zig/src/families/dsv41/structure.zig` (export part)
-- Test: `zig/src/families/dsv41/structure_test.zig` (extend)
-
-**Interfaces:**
-- Consumes: the engine tokenizer (`core/tokenizer`), `tfso_init`.
-- Produces: `pub fn exportVocab(a: Allocator, tok: *const Tokenizer, padded_vocab: usize) !void` — builds `(bytes, lens, stops)` arrays, calls `tfso_init` once; `pub fn vocabReady() bool`.
-
-- [ ] **Step 1: Write the failing test** — a small hand-built tokenizer fixture (10 tokens incl. `<|end|>`) → `exportVocab` succeeds, `vocabReady()` true; calling it twice is a no-op.
-
-- [ ] **Step 2: Run** — expect failure (function absent).
-
-- [ ] **Step 3: Implement** — iterate ids in order, skip nothing (padded ids above the real vocab get empty bytes and are excluded from the mask by the shim's stop/vocab-size handling), pass `vocab_type=RAW`, all stop/eos ids.
-
-- [ ] **Step 4: Run** — PASS.
-
-- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): export the vocabulary to the grammar engine"`
-
-### Task 5: Device mask and captured-stretch node
-
-**Files:**
-- Create: `zig/src/families/dsv41/structure_mask.zig`
-- Modify: `zig/src/families/dsv41/round.zig` (the `Graphs` capture path)
-
-**Interfaces:**
-- Produces: `pub const MaskBuf = struct { dev: *anyopaque, host: []i32, words: usize, flag_dev: *anyopaque, pub fn upload(self: *MaskBuf, stream: *cuda.Stream) !void; };` `pub fn maskRowKernel(stream: *cuda.Stream, logits: [*]f32, vocab: usize, buf: *MaskBuf, row_flag: *anyopaque) void;`
-
-- [ ] **Step 1: Write the failing test** — host-side: a 64-wide fake row, a mask with bit 5 and 9 allowed, flag 1 → the row's other entries become `-inf`; flag 0 → row unchanged (bit-identical copy).
-
-- [ ] **Step 2: Run** — `zig build test`; expect failure.
-
-- [ ] **Step 3: Implement** — a persistent per-lane device buffer allocated with the stream, the flag in device memory, the kernel launched from the same stream the round uses and captured inside the stretch (`round.Graphs.run`), the host upload called before every launch; `TF_DS_SO=0` keeps the flag 0 forever.
-
-- [ ] **Step 4: Run** — PASS; then live: `GRAPHS=1` unconstrained traffic must stay byte-identical (Task 11 gate 2 exercises it).
-
-- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): on-device grammar mask inside the captured stretch"`
-
-### Task 6: Matcher state machine and round hook
-
-**Files:**
-- Modify: `zig/src/families/dsv41/structure.zig`, `zig/src/families/dsv41/layer_main.zig` (the `sampleDev` call sites)
-- Test: `zig/src/families/dsv41/structure_test.zig`
-
-**Interfaces:**
-- Consumes: Task 2 shim, Task 3 cache, Task 4 export, Task 5 mask.
-- Produces: `pub const Stream = struct { matcher: ?*anyopaque, engaged: bool, completed: bool, after: ?u32 };` `pub fn prepare(cache: *core_structure.Cache, stream: *Stream, kind: Kind, text: []const u8, after: ?u32) !void`; `pub fn onToken(stream: *Stream, id: u32) !void` (advances or engages at `after`; on completion marks `completed`); `pub fn fill(stream: *Stream, buf: *MaskBuf) !void` (all-ones once `completed`; before `engaged`, the full mask); `pub fn release(stream: *Stream) void`.
-
-- [ ] **Step 1: Write the failing tests** — (a) idle until `after` is emitted, then masked; (b) after completion, `fill` yields all-ones and `onToken` never fails; (c) `onToken` with a special-token id after completion does not error; (d) `release` frees the matcher and a second `release` is safe; (e) `\n\n` before `{` is accepted (the grammar's leading `\s*`).
-
-- [ ] **Step 2: Run** — expect failures.
-
-- [ ] **Step 3: Implement** — the state machine; the round hook advances the matcher with the last accepted token and uploads the mask before `sampleDev`; cancel and finish call `release`.
-
-- [ ] **Step 4: Run** — PASS.
-
-- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): matcher lifecycle and decode-round hook"`
-
-### Task 7: TP=2 mask slicing
-
-**Files:**
-- Modify: `zig/src/families/dsv41/structure.zig`, the ring exchange path in `zig/src/families/dsv41/round.zig` / `comm.zig`
-- Test: `zig/src/families/dsv41/structure_test.zig`
-
-**Interfaces:**
-- Produces: `pub fn sliceFor(rank: u32, world: u32, full: []const i32, vocab: usize) []const i32`; rank 0 sends rank 1's slice over the existing RDMA ring message used for decode-size exchanges; rank 1 receives it into its mask buffer and never calls `tfso_*`.
-
-- [ ] **Step 1: Write the failing test** — a 128-word mask split across 2 ranks: `sliceFor(1,2,...)` returns the second half word-aligned, and `sliceFor(0,2,...)` the first; a vocab not divisible by 32 rounds up and never reads past the end.
-
-- [ ] **Step 2: Run** — expect failure.
-
-- [ ] **Step 3: Implement** — rank 0 compiles/advances/fills; the slice is sent before the round's graph launch; rank 1 uploads its slice; the existing candidate exchange and agreement guard are untouched.
-
-- [ ] **Step 4: Run** — PASS.
-
-- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): rank 1 receives its vocabulary slice of the mask"`
-
-### Task 8: Capability flag, kill switch, drafting exclusion
-
-**Files:**
-- Modify: `zig/src/families/dsv41/dsv41.zig` (`Info`), `zig/src/families/dsv41/lanes.zig`
-
-**Interfaces:**
-- Produces: `Info.structures = soEnabled()` where `soEnabled()` reads `TF_DS_SO` (default 1); every structured stream is excluded from draft admission.
-
-- [ ] **Step 1: Write the failing test** — host test: with `TF_DS_SO=0` the advertised `Info.structures` is false; with it unset/1, true. A structured stream never qualifies for a drafted round.
-
-- [ ] **Step 2: Run** — expect failure.
-
-- [ ] **Step 3: Implement** — the flag and the admission condition (mirroring `loneFits`'s `r.structure != null` check in the family's own admission).
-
-- [ ] **Step 4: Run** — PASS.
-
-- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): advertise structures; constrained streams never draft"`
-
-### Task 9: Metrics and failure surfacing
-
-**Files:**
-- Modify: `zig/src/families/dsv41/structure.zig` (counters), `zig/src/server/chat.zig` (streaming failure frame), the metrics registry
+- Create: `zig/src/core/structure/tfso.h`, `zig/src/core/structure/tfso.cc`
+- Modify: `build.zig`
 - Test: `zig/src/core/structure_test.zig`
 
 **Interfaces:**
-- Produces: `so_requests_total`, `so_aborted_total`, `so_cache_bytes`, `so_compile_ms`, `so_compile_threads_busy`; a matcher failure after headers ends a stream with `data: {"error": …}` then closes, and a non-streaming failure keeps the engine's existing `cx.other` reply.
+- Produces: the `tfso_*` surface of spec §4, every call taking `char* err, int cap`; `tfso_grammar_bytes`; `tfso_fill_bitmask` returning the need-apply flag.
 
-- [ ] **Step 1: Write the failing test** — counters increment on compile/abort; a simulated failure produces exactly one error frame and a closed stream.
+- [ ] **Step 1: Write the first failing test — the skip behaviour**
+
+Test `shim tests are skipped without -Dxgrammar`: build without the option and assert the test binary prints the skip note and exits 0.
+
+- [ ] **Step 2: Run it** — `~/opt/zig-0.17.0/zig build test`; expected PASS after the wiring exists (this test is what pins the wiring).
+
+- [ ] **Step 3: Wire `build.zig`** — a `-Dxgrammar` option (default empty); when set, a system step runs `g++ -std=c++17 -fPIC -I<xg>/include -c zig/src/core/structure/tfso.cc -o tfso.o` and `ar rcs libtfso.a tfso.o`; the test and native targets link `libtfso.a`, `libxgrammar.a`, `stdc++`, `gcc`; `linkLibCpp` stays off; when unset, the shim tests are skipped with the printed note.
+
+- [ ] **Step 4: Write the shim tests** — fake 20-token vocab; `tfso_init`; `tfso_compile_json_schema` with `{"type":"object","properties":{"a":{"type":"string"}}}`; `tfso_fill_bitmask` sets `{` and clears a plain word; an invalid schema returns non-zero with a message in the caller's buffer (two concurrent failures keep distinct messages).
+
+- [ ] **Step 5: Run** — `~/opt/zig-0.17.0/zig build test -Dxgrammar=$HOME/opt/xgrammar-0.2.2`; expected PASS.
+
+- [ ] **Step 6: Implement** `tfso.cc` — `TokenizerInfo` (RAW, padded size, stop ids), `GrammarCompiler` with its cache disabled, `GrammarMatcher`; every call wrapped in `try/catch (const std::exception&)` copying `what()` into the caller's buffer; `tfso_grammar_bytes` returns `MemorySizeBytes()`.
+
+- [ ] **Step 7: Commit** — `git add zig/src/core/structure zig/src/core/structure_test.zig build.zig && git commit -m "feat(core): xgrammar shim and its g++ build step"`
+
+### Task 2: Compile cache and kind mapping  [engine repo]
+
+**Files:**
+- Create: `zig/src/core/structure.zig`; extend `zig/src/core/structure_test.zig`
+
+**Interfaces:**
+- Consumes: Task 1's shim.
+- Produces: `pub const Kind = enum { json, json_schema, regex, choice, grammar };` `pub const Cache = struct { pub fn init(a: Allocator, bytes: usize) Cache; pub fn getOrCompile(self: *Cache, kind: Kind, text: []const u8, timeout_ms: u64) !*Grammar; pub fn deinit(self: *Cache) void; };` `pub fn choiceGrammar(a: Allocator, choices_json: []const u8) ![]const u8;` `GrammarsEntry = struct { g: *Grammar, bytes: usize, text: []const u8 };`
+
+- [ ] **Step 1: Write the failing tests** — (a) two puts with the same hash and different text yield different grammars; (b) the byte bound evicts LRU; (c) cache 0 compiles per call; (d) two threads asking for the same uncached schema trigger **one** compile (dedupe); (e) `choiceGrammar("[\"a\",\"b\"]")` → `root ::= "\"a\"" | "\"b\""`; (f) a timeout returns `error.Timeout` while the worker finishes; (g) an invalid schema returns the compiler's message in the error buffer.
+
+- [ ] **Step 2: Run** — expect failures for the missing declarations.
+
+- [ ] **Step 3: Implement** — mutexed map keyed `(kind, text)` with the text stored and compared; in-flight map for dedupe; worker pool capped by `TF_DS_SO_COMPILE_THREADS`; eviction by `tfso_grammar_bytes`; the kind→call mapping of spec §4; `choice` alternation with JSON-quote escaping.
+
+- [ ] **Step 4: Run** — expect PASS.
+
+- [ ] **Step 5: Commit** — `git commit -m "feat(core): structured-output compile cache with dedupe and byte bound"`
+
+### Task 3: Compile at admission  [engine repo]
+
+**Files:**
+- Modify: `zig/src/core/engine_api.zig` (`Structure.handle`), `zig/src/server/server.zig` (`checkFeatures`, boot init)
+- Test: `zig/src/core/structure_test.zig` (server-level test file if one exists)
+
+**Interfaces:**
+- Produces: `Structure.handle: ?*anyopaque = null`; at boot, when `info.structures`, the server initializes `core/structure` from `srv.text`; `checkFeatures` calls `getOrCompile` and `cx.refuse`s on error/timeout, then sets `request.structure.handle`.
+
+- [ ] **Step 1: Write the failing test** — a request with a valid schema through `checkFeatures` yields a non-null `handle`; an invalid schema is refused with the compiler message; a simulated timeout is refused (no header sent); `strict:false` is accepted and the handle is valid.
 
 - [ ] **Step 2: Run** — expect failure.
 
-- [ ] **Step 3: Implement** — counters on the existing `/metrics` path; the streaming branch reuses the `.failed` path at `chat.zig` (~:470) with an error frame instead of a finish reason.
+- [ ] **Step 3: Implement** — the field, the boot init (rank 0 only; rank 1 skips), the compile call, the refusals; no compile ever runs on the lane thread.
 
-- [ ] **Step 4: Run** — PASS.
+- [ ] **Step 4: Run** — expect PASS.
 
-- [ ] **Step 5: Commit** — `git commit -m "feat: structured-output metrics and streamed failure frame"`
+- [ ] **Step 5: Update the spec's §2** to record that `server.zig` and `engine_api.zig` are modified, and commit — `git commit -m "feat(server): compile structured output at admission"`
 
-### Task 10: Image build wiring and patch export
+### Task 4: Vocabulary export  [engine repo]
 
 **Files:**
-- Modify: `zig/Dockerfile`, `scripts/config.sh`, `scripts/prepare.sh`, `zig/patches/README.md`
-- Create: `zig/patches/0034-structured-output.patch`
+- Create/modify: `zig/src/families/dsv41/structure.zig`; extend `zig/src/families/dsv41/structure_test.zig`; wire into rank 0's boot in `dsv41.zig`/`native.zig`
 
 **Interfaces:**
-- Produces: `XGRAMMAR_REF` pinned in `config.sh`, passed by `prepare.sh` as `--build-arg`, echoed by `image_hash`; the Dockerfile clones xgrammar `--recursive`, builds it with g++ (Python off) **before** `zig build`, and the engine links `libtfso.a` + `libxgrammar.a` + libstdc++ (no `linkLibCpp`); the build context wording says `zig/patches` **and** `zig/patches-inputs`.
+- Produces: `pub fn exportVocab(a: Allocator, tok: *const Tokenizer, padded: usize) !void`; `pub fn vocabReady() bool`.
 
-- [ ] **Step 1: Export the patch** — in the engine checkout: `git diff > 0034-structured-output.patch`; verify `git apply --check` on a clean `TF_REF` with `0001`–`0033` applied, then `git apply` it and confirm the tree matches.
+- [ ] **Step 1: Write the failing test** — a 10-token fixture including a special token: export succeeds; the special token's bytes are empty; `vocab_size` is the padded size; a second call is a no-op.
 
-- [ ] **Step 2: Run the build** — `scripts/prepare.sh`; expect a new image tag and a successful `zig build` with the shim linked.
+- [ ] **Step 2: Run** — expect failure.
 
-- [ ] **Step 3: Add the README row** — the patch table entry: what it does, switches (`TF_DS_SO`, `TF_DS_SO_CACHE_BYTES`, `TF_DS_SO_TIMEOUT_S`, `TF_DS_SO_COMPILE_THREADS`), defaults, and the measurements to be filled from Task 11.
+- [ ] **Step 3: Implement** — iterate the real vocab only; empty bytes for specials; stop ids; RAW; call `tfso_init` once; wire the call into rank 0's boot when `info.structures` and `TF_DS_SO` is on.
 
-- [ ] **Step 4: Commit** — `git add zig/Dockerfile scripts/config.sh scripts/prepare.sh zig/patches/README.md zig/patches/0034-structured-output.patch && git commit -m "feat(zig): structured-output patch 0034 and its image build"`
+- [ ] **Step 4: Run** — expect PASS.
 
-### Task 11: Probe tool and live gates
+- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): export the vocabulary (specials blocked) at rank 0 boot"`
+
+### Task 5: Mask kernel and application points  [engine repo]
+
+**Files:**
+- Create: `zig/src/families/dsv41/structure_mask.cu`, `tools/so_gpu_test.cpp`
+- Modify: `zig/src/families/dsv41/layer_main.zig` (both `sampleDev` sites), `build.zig` (nvcc step for the `.cu`)
+
+**Interfaces:**
+- Produces: `pub fn maskRow(stream: *cuda.Stream, logits: [*]f32, vocab: usize, bits: []const i32, rows: []const u32) void;` a pinned host staging buffer + device buffer allocated once at boot (max rows × words).
+
+- [ ] **Step 1: Write the failing host test** — a CPU reference of the bit math: a 64-wide row, bits allowing 5 and 9, flag 1 → others `-inf`; the same with a row not constrained → unchanged (bit-identical copy).
+
+- [ ] **Step 2: Run** — expect failure.
+
+- [ ] **Step 3: Implement the kernel and the wiring** — `.cu` compiled by the image's nvcc; the host fills the bitmask, H2D-copies into the staging buffer, launches the kernel **after `round.forward` returns and before `sampleDev`** at both sites (:1185, :1316), scoped to the round's constrained rows; confirm in code that both sites are outside the captured stretch (`round.zig` `Graphs`) and record it in the patch header.
+
+- [ ] **Step 4: Run the GPU test binary on the Spark** — `tools/so_gpu_test.cpp` builds and runs outside `zig build test`: a 128-wide row, mask, expect the `-inf` set and the untouched rows byte-equal; run with `-inf` values through the sampler (`sampleRow`) and assert no NaN with a single allowed token.
+
+- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): device mask kernel applied before sampling"`
+
+### Task 6: Matcher state machine and streaming hook  [engine repo]
+
+**Files:**
+- Modify: `zig/src/families/dsv41/structure.zig`, `zig/src/families/dsv41/layer_main.zig`
+- Test: extend `zig/src/families/dsv41/structure_test.zig`
+
+**Interfaces:**
+- Produces: `pub const Stream = struct { matcher: ?*anyopaque, phase: enum { idle, ws, engaged, done }, ws_used: u8, after: ?u32 };` `pub fn prepare(cache: *core_structure.Cache, s: *Stream, kind: Kind, text: []const u8, after: ?u32) !void`; `pub fn onToken(s: *Stream, id: u32) !void`; `pub fn fill(s: *Stream, buf: []i32) !void`; `pub fn release(s: *Stream) void`.
+
+- [ ] **Step 1: Write the failing tests** — (a) idle until `after`; (b) the whitespace phase accepts `\n\n` then engages; (c) a 5th whitespace character is refused; (d) after completion `fill` is all-ones and `onToken` never fails on special ids; (e) `release` frees and is idempotent; (f) cancel mid-decode leaves no matcher.
+
+- [ ] **Step 2: Run** — expect failures.
+
+- [ ] **Step 3: Implement** — the state machine with a boot-computed whitespace-token set; the round hook advances with the last accepted token and fills the mask before `sampleDev`; `release` on finish and on cancel; the matcher touched only by the lane thread.
+
+- [ ] **Step 4: Run** — expect PASS.
+
+- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): matcher state machine with bounded whitespace phase"`
+
+### Task 7: TP slicing over the ring  [engine repo]
+
+**Files:**
+- Modify: `zig/src/families/dsv41/structure.zig`, the ring message in `zig/src/families/dsv41/rdma.zig` (or the decode-size exchange path), `layer_main.zig` (rank 1 receives before its launch)
+- Test: extend `zig/src/families/dsv41/structure_test.zig`
+
+**Interfaces:**
+- Produces: `pub fn sliceFor(rank: u32, world: u32, full: []const i32, vocab_per_rank: []const usize) Slice` where `Slice = struct { bits: []const i32, bit_offset: u6 };`; a ring message carrying `bits` + `bit_offset` + the round id; rank 1 shifts its slice in.
+
+- [ ] **Step 1: Write the failing tests** — a boundary at 1000 (not 32-aligned): rank 1's slice has `bit_offset = 1000 % 32` and masks the right ids; a message round-trip of the slice + offset; no send when the round has no constrained row.
+
+- [ ] **Step 2: Run** — expect failure.
+
+- [ ] **Step 3: Implement** — rank 0 fills and sends only in constrained rounds; rank 1 receives, shifts, uploads; check the ring slot capacity and grow it in the ring's own sizing terms if needed; the existing candidate exchange and agreement guard untouched.
+
+- [ ] **Step 4: Run** — expect PASS; GPU binary: rank 1's masked row produces the same token as rank 0's.
+
+- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): rank 1 receives a bit-shifted mask slice"`
+
+### Task 8: Capability flag, kill switch, drafting exclusion  [engine repo]
+
+**Files:**
+- Modify: `zig/src/families/dsv41/dsv41.zig`, `zig/src/families/dsv41/lanes.zig`
+
+**Interfaces:**
+- Produces: `Info.structures = soEnabled()` from `TF_DS_SO`; every admission path excludes a structured stream from drafting; constrained rows never share a round with drafted rows.
+
+- [ ] **Step 1: Write the failing test** — `TF_DS_SO=0` → `Info.structures` false; a structured stream never qualifies for a drafted round; a mixed round is never formed.
+
+- [ ] **Step 2: Run** — expect failure.
+
+- [ ] **Step 3: Implement** — the flag and the admission conditions (mirror `loneFits`'s `r.structure != null` in the family's own paths).
+
+- [ ] **Step 4: Run** — expect PASS.
+
+- [ ] **Step 5: Commit** — `git commit -m "feat(dsv41): advertise structures; constrained streams never draft"`
+
+### Task 9: Metrics, fault injection, scoped failure frame  [engine repo]
+
+**Files:**
+- Modify: `zig/src/families/dsv41/structure.zig`, `zig/src/server/chat.zig`, the metrics registry
+- Test: a server-level test file next to `chat.zig`
+
+**Interfaces:**
+- Produces: `so_requests_total`, `so_aborted_total`, `so_cache_bytes`, `so_compile_ms`, `so_compile_threads_busy`; `TF_DS_SO_FAULT=accept` makes the matcher reject the next token; a structured request's mid-stream failure emits one `data: {"error": …}` frame and closes; other failure classes unchanged.
+
+- [ ] **Step 1: Write the failing test** — counters increment; with `TF_DS_SO_FAULT=accept` a streamed structured request produces exactly one error frame and closes; a non-structured failure keeps today's behaviour.
+
+- [ ] **Step 2: Run** — expect failure.
+
+- [ ] **Step 3: Implement** — counters; the fault switch; the error frame scoped by `request.structure != null`.
+
+- [ ] **Step 4: Run** — expect PASS.
+
+- [ ] **Step 5: Commit** — `git commit -m "feat: structured-output metrics, fault switch, scoped error frame"`
+
+### Task 10: Image build and the feature-off checkpoint  [recipe repo]
+
+**Files:**
+- Modify: `zig/Dockerfile`, `scripts/config.sh`, `scripts/prepare.sh`
+
+**Interfaces:**
+- Produces: `XGRAMMAR_REF` pinned in `config.sh`, passed by `prepare.sh`, echoed by `image_hash`; the Dockerfile clones xgrammar `--recursive`, builds it with g++ (Python bindings off, Release, install) **before** `zig build`; the engine links `libtfso.a` + `libxgrammar.a` + libstdc++ + libgcc; the build-context comment says `zig/patches` and `zig/patches-inputs`.
+
+- [ ] **Step 1: Record the baseline** — on the current `main` image, `tools/exact.py --drafts on` → save the record.
+
+- [ ] **Step 2: Wire the build** — `config.sh` pin; `prepare.sh --build-arg XGRAMMAR_REF`; `image_hash` echoes it; Dockerfile steps in order; link flags.
+
+- [ ] **Step 3: Build and run the checkpoint** — `scripts/prepare.sh`; `TF_DS_SO=0 ./stop.sh && TF_DS_SO=0 ./start.sh`; `tools/exact.py --like <record>`.
+Expected: the image builds, the server serves, the bits match the baseline.
+
+- [ ] **Step 4: Commit** — `git add zig/Dockerfile scripts/config.sh scripts/prepare.sh && git commit -m "feat(zig): build xgrammar and the shim into the engine image"`
+
+### Task 11: Probe and full live gates  [recipe repo]
 
 **Files:**
 - Create: `tools/structure_probe.py`
-- Modify: `zig/patches/0034-structured-output.patch` (header receipts), `zig/patches/README.md`
 
-- [ ] **Step 1: Write the probe** — schemas (flat, nested, enum, long-string, regex, choice) × thinking on/off × stream/non-stream; validate every reply against its schema; include the `\n\n`-after-think case, `strict:false`, an unsupported Lark grammar (expect 400), `response_format`+`tools`+"auto" (expect no calls), an unsatisfiable schema (expect length/failed, server healthy), and a cancel mid-decode.
+- [ ] **Step 1: Write the probe** — the matrix of spec §10.4: schemas × thinking × streaming, the formerly-400 case, malformed schema, unsupported Lark/regex, spec beside required `tool_choice`, spec + `tools` + "auto", `\n\n` after think-close, `strict:false`, unsatisfiable schema (`length`), `TF_DS_SO_FAULT=accept` (error frame), cancel mid-decode, mixed 4-stream run.
 
-- [ ] **Step 2: Run the gates** — `./stop.sh && ./start.sh` with `/mnt/nvmeof` healthy; then `tools/exact.py` (unconstrained byte-identical, `GRAPHS=1`, drafts on), the probe, a mixed 4-stream run, and `/metrics` checks.
+- [ ] **Step 2: Run the gates** — feature on (`./stop.sh` + `./start.sh`), then `exact.py` (byte-identity), the probe, the mixed run, the sampler-sanity run (`-inf` + penalties/top-p/min-p + single allowed token), `TF_DS_SO=0` (old 400), one rehearsed rollback, `/metrics`.
 
-- [ ] **Step 3: Record the receipts** — decode-speed cost with drafts off on a constrained request, the cache bound in use, and the gate results, into the patch header and README row (the repo's culture).
+- [ ] **Step 3: Commit** — `git add tools/structure_probe.py && git commit -m "feat: structured-output probe and live gates"`
 
-- [ ] **Step 4: Commit** — `git commit -m "feat: structured-output probe and live gate receipts (0034)"`
+### Task 12: Export patch 0034  [recipe repo]
+
+**Files:**
+- Generate: `zig/patches/0034-structured-output.patch`; `zig/patches/README.md` row.
+
+- [ ] **Step 1: Export** — `scripts/port-patches.sh --engine ~/repos/tensorfold-dsv41-dev --branch structured-output --base so-base --mode squash --name structured-output --title "…"`.
+Expected: the script verifies the base, applies the patch on a clean `TF_REF` + `0001`–`0033`, and confirms the result equals the branch; it writes `0034-structured-output.patch` and the README row.
+
+- [ ] **Step 2: Fill the receipts** — add the measured decode cost (drafts off), the cache bound, and the gate results to the patch header.
+
+- [ ] **Step 3: Commit** — `git add zig/patches && git commit -m "feat(zig): export structured-output patch 0034 with gate receipts"`
