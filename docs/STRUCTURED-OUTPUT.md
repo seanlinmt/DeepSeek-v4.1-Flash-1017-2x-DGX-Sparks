@@ -1,5 +1,11 @@
 # Structured output — the design of `zig/patches/0034`
 
+Revision 4, 2026-10-31: the shim's boundary is settled by the implementation — a g++-built
+shared library loaded with `std.DynLib` (§5), not a statically linked object. Zig's lld cannot
+read GCC-LTO static libstdc++, and archive scanning left xgrammar's members unresolved in every
+arrangement tried. The engine therefore has no link-time dependency on C++; a missing library
+leaves `Info.structures` false.
+
 Branch `engine-structured-output`. Revision 3, 2026-10-30: the plan review's
 items are integrated (patch export, compile-at-admission, shim build toolchain,
 mask outside the captured graph, TP slicing with bit shifts, bounded whitespace,
