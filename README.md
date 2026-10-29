@@ -323,6 +323,7 @@ Settings come from the environment, `scripts/local.sh` or `.env`; the defaults a
 | `TEMPERATURE`, `TOP_P`, `TOP_K` | 1.0, 0.95, 20 | the server's sampling defaults; a request's own values win. This engine refuses a `top_k` above 56 with `TooManyCandidates` (the finite candidate list its sampler keeps), so `TOP_K` is at most 56; `top_k` 0 or -1 is refused too, with a different, misleading message |
 | `DRAFTS` | 1 | the checkpoint's DSpark draft blocks (drafted replies equal plain ones) |
 | `RDMA`, `GRAPHS`, `SIDE`, `PREFETCH`, `ENGRAM_AIO` | 1 | the engine's served settings |
+| `GRAPH_CAP` | 128 | the CUDA graphs each rank keeps with `GRAPHS=1`; past it the least recently replayed one is destroyed and captured again when needed (`zig/patches/0033`, issue #69). `0` keeps every graph: the cache then grows for days with growing conversations and is never freed. A count that keeps rising in the log ("destroyed for newer ones") means the cap is below the working set; that costs a capture per stretch (about 5% of single-stream decode at worst on the pair), not memory |
 | `RDMA_IDLE_S`, `RDMA_NAP_US` | 2, 500 | the RDMA proxy naps after 0–3600 quiet seconds, sleeping `RDMA_NAP_US` (1–1000000 microseconds) between looks (`zig/patches/0010`); `RDMA_IDLE_S=0` keeps the stock always-spinning proxy. The patch's engine fallback is 100 µs if `TF_RDMA_NAP_US` is unset; the recipe sets 500 µs because the Zig ring's two CQ polls per wake cost more than the Python line's. 2 s is enough that active decode never naps |
 | `MAX_TOKENS` | 32768 | a reply's budget when a request sets none |
 | `MIN_AVAIL_GIB`, `MIN_AVAIL_WAIT_S` | 112, 30 | `start.sh` refuses to start with less memory available than this on either Spark (`0` skips the check); it re-reads the memory for up to `MIN_AVAIL_WAIT_S` seconds first, because the page cache a build or a large copy just left counts as available only once it is written back (`0` reads once) |
@@ -377,6 +378,14 @@ for those defaults: the start goes on **without** the feature, with a loud `SPIL
   window is refused, naming the value. **The same `POOL` costs about half the KV memory a Spark** (owner-only planes):
   measured at 2,101,248 positions, 1,062 MiB a rank against 1,783 MiB replicated, for 1-4% decode. Runs together with
   spill.
+
+**The ranks' Engram folders must list the same files.** With the tier on, the rank fingerprint covers the Engram
+folder's regular files by name and size (`zig/patches/0016`, `fingerprint.zig`'s `listing()`, which skips symlinks).
+With `HEAD_ENGRAM_DIR` empty rank 0 reads the HF snapshot, whose entries are symlinks into `blobs/`, so it lists nothing
+while `WORKER_ENGRAM_DIR` lists its four files: the pair then refuses to load with `FingerprintMismatch` in `engram`
+(issue #61). `start.sh` compares the two listings before anything is stopped and refuses with both of them and the fix;
+put the same files on the head's disk and point `HEAD_ENGRAM_DIR` at them (hardlinks cost no extra disk), which also
+gives rank 0 local Engram reads instead of the HF cache.
 
 | Switch | Default | |
 | --- | --- | --- |
