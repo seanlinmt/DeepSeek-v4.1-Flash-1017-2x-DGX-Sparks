@@ -11,16 +11,15 @@ probe in `tools/`, and this document.
 
 ## 0. Status
 
-The design decisions below were approved on 2026-10-30. One item needs explicit
-sign-off (§1, "surface"): enabling the engine's capability flag accepts more
-fields than the originally approved `response_format` minimum.
+The design decisions below were approved on 2026-10-30, including the surface
+superset (§1, "surface") — explicitly signed off the same day.
 
 ## 1. The decisions
 
 | Decision | Choice |
 | --- | --- |
 | Grammar engine | **xgrammar 0.2.2**, pinned by git SHA. **Both** xgrammar and the shim are built with the image's **g++ against libstdc++**; the engine's final link adds libstdc++ and does **not** link libc++ (`linkLibCpp` off). One C++ runtime, one `std::string`/`std::vector` layout — no objects cross between two runtimes. The shim's `extern "C"` surface carries only POD (byte buffers, int32 masks, opaque handles), so nothing C++ crosses into Zig. **llguidance** (plain C API, no C++ objects at all) is the named fallback if xgrammar's standalone build fails. Runtime cost is a wash at this serving scale (<1% of a 30–60 ms step either way); xgrammar wins on build footprint and on contract parity with DeepInfer, whose integration recipe this follows. |
-| Request surface | `response_format` `json_object` / `json_schema` (the approved minimum). **Awaiting explicit sign-off:** the server parses the whole structured-output surface as one unit behind `Info.structures` (§2), so enabling it also accepts `guided_json` / `guided_regex` / `guided_choice` / `guided_grammar` and `structured_outputs`. A superset — refusing fields the engine already parses adds code for no benefit. **Known subset limit:** xgrammar accepts JSON Schema, its own regex dialect (Rust-style) and EBNF/GBNF-style grammars; it does **not** take Lark grammars that vLLM's `guided_grammar` accepts, and its regex support is a subset. Such requests will now get a **400 at compile time** with the compiler's message instead of today's blanket 400 — a behaviour change for `guided_*` clients only. |
+| Request surface | `response_format` `json_object` / `json_schema` (the approved minimum). **Signed off 2026-10-30:** the server parses the whole structured-output surface as one unit behind `Info.structures` (§2), so enabling it also accepts `guided_json` / `guided_regex` / `guided_choice` / `guided_grammar` and `structured_outputs`. A superset — refusing fields the engine already parses adds code for no benefit. **Known subset limit:** xgrammar accepts JSON Schema, its own regex dialect (Rust-style) and EBNF/GBNF-style grammars; it does **not** take Lark grammars that vLLM's `guided_grammar` accepts, and its regex support is a subset. Such requests will now get a **400 at compile time** with the compiler's message instead of today's blanket 400 — a behaviour change for `guided_*` clients only. |
 | Drafts | A constrained request never drafts: plain decode for its lifetime. All other streams keep DSpark drafts. |
 | Validation | Full live gates on the pair (§10). |
 
