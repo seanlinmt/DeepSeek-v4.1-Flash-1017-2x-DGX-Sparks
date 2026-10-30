@@ -1,0 +1,1868 @@
+# port-patches.sh: structured-output @ e1dd467d60ac over so-base @ 6e55468809bb (squash 6e55468809bb..e1dd467d60ac)
+# structured output: xgrammar-constrained decoding
+# Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
+diff --git a/build.zig b/build.zig
+index 4af884e3f3a19c653036acf924a6092de426979b..e2da03872a87c9b453e8e2dbda5f4d3e847a564c 100644
+--- a/build.zig
++++ b/build.zig
+@@ -128,13 +128,16 @@ pub fn build(b: *std.Build) void {
+     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
+     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
+     const test_step = b.step("test", "Host-side unit tests (no GPU work)");
++    // the structured-output shim needs a local xgrammar build; empty: its tests skip
++    const xgrammar = b.option([]const u8, "xgrammar", "xgrammar install prefix (include/, lib/libxgrammar.a): builds the structured-output shim") orelse "";
++    const so_runtime = b.option([]const u8, "so-runtime", "runtime path of libtfso.so, as the image installs it") orelse "";
+     switch (target.result.os.tag) {
+         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
+-        .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
++        .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options, xgrammar, so_runtime),
+         else => {},
+     }
+     dist_build.targets(b, draft_ids, build_options, release_version);
+-    cuda_build.hostTests(b, draft_ids, test_step);
++    cuda_build.hostTests(b, draft_ids, test_step, xgrammar, so_runtime);
+ }
+ 
+ /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
+diff --git a/tfso.mri b/tfso.mri
+new file mode 100644
+index 0000000000000000000000000000000000000000..c727db30fe39956f67bddd48b1554f7c79c4f2ea
+--- /dev/null
++++ b/tfso.mri
+@@ -0,0 +1,8 @@
++create "./.zig-cache/o/7b6cfcee30be1862c4e743ba60e75d58/libtfso.a"
++addmod tfso.o
++addlib "/home/sean/opt/xgrammar-0.2.2/lib/libxgrammar.a"
++addlib "/usr/lib/gcc/aarch64-linux-gnu/13/libstdc++.a"
++addlib "/usr/lib/gcc/aarch64-linux-gnu/13/libgcc_eh.a"
++addlib "/usr/lib/gcc/aarch64-linux-gnu/13/libgcc.a"
++save
++end
+diff --git a/tfso.o b/tfso.o
+new file mode 100644
+index 0000000000000000000000000000000000000000..508148f542f64e346b01538649933bd6c34f4cb3
+GIT binary patch
+literal 26336
+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
+V+D|z>U3>8z)nX1A$BMK4{{znhB)<Rv
+
+literal 0
+HcmV?d00001
+
+diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
+index 57f775050b8449d2c7aa09099abe5a9fae62b02b..0d58616c493795f921276ff65b74ebc756b9f052 100644
+--- a/zig/build/cuda.zig
++++ b/zig/build/cuda.zig
+@@ -84,7 +84,7 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
+ }
+ 
+ /// Linux targets: fatbins (-Dnvcc builds them, -Dfatbins embeds prebuilt ones), `tensorfold` and `tf-cuda-test`.
+-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options) void {
++pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, xgrammar: []const u8, so_runtime: []const u8) void {
+     const nvcc = b.option([]const u8, "nvcc", "nvcc (or a wrapper) that builds the CUDA kernel fatbins");
+     const prebuilt = b.option([]const u8, "fatbins", "absolute directory of prebuilt <name>.fatbin files to embed");
+     const sms = b.option([]const u8, "sm", "SASS targets, comma separated (121; later 120,89)") orelse "121";
+@@ -167,7 +167,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
+     const ds_port = b.createModule(.{ .root_source_file = b.path("zig/src/families/dsv41/port_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+     ds_port.addImport("cuda", cuda);
+     b.installArtifact(b.addExecutable(.{ .name = "tf-dsv41-port", .root_module = ds_port }));
+-    _ = nativeServer(b, target, optimize, cuda, mods.lanes, mods.nemotron, mods.core, mods.tokenizer, build_options, true);
++    _ = nativeServer(b, target, optimize, cuda, mods.lanes, mods.nemotron, mods.core, mods.tokenizer, build_options, xgrammar, so_runtime, true);
+ }
+ 
+ /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
+@@ -193,18 +193,22 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
+ }
+ 
+ /// `zig build native`: tensorfold-native with the CUDA engines into zig-out/native/bin, as the Metal build makes it.
+-fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, core: *std.Build.Module, tokenizer: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool) *std.Build.Step.Compile {
++fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, core: *std.Build.Module, tokenizer: *std.Build.Module, build_options: *std.Build.Step.Options, xgrammar: []const u8, so_runtime: []const u8, install_native: bool) *std.Build.Step.Compile {
+     const m = engines(b, target, optimize, cuda, lanes, nemotron, core);
+     // the HTTP side keeps its safety checks; the engine below it runs at `optimize` (the tokenizer is the family's)
+     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
++    // the structured-output compile cache and shim loader, as its own module (the server imports it by name)
++    const structure_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/structure.zig"), .target = target, .optimize = optimize, .link_libc = true });
+     const exe = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
+         .root_source_file = b.path("zig/src/server/main.zig"),
+         .target = target,
+         .optimize = .ReleaseSafe,
+         .link_libc = true,
+-        .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = m.engines }} }) } },
++        .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "structure", .module = structure_mod }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = m.engines }} }) } },
+     }) });
+     exe.root_module.addOptions("build_options", build_options);
++    if (xgrammar.len > 0) build_options.addOptionPath("so_lib", tfsoShared(b, target, xgrammar)) else build_options.addOption([]const u8, "so_lib", "");
++    build_options.addOption([]const u8, "so_lib_runtime", so_runtime);
+     if (!install_native) {
+         exe.root_module.strip = true;
+         return exe;
+@@ -216,8 +220,17 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
+ 
+ /// Host unit tests of the CUDA runtime, the backend-neutral core, the lane core, the engine API with its lane host and the
+ /// CUDA family (no GPU), on any host.
+-pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, step: *std.Build.Step) void {
++pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, step: *std.Build.Step, xgrammar: []const u8, so_runtime: []const u8) void {
+     const host = b.graph.host;
++    // the structured-output shim (xgrammar behind tfso.h): its tests skip unless -Dxgrammar is set
++    const so = b.createModule(.{ .root_source_file = b.path("zig/src/core/structure_test.zig"), .target = host, .optimize = .debug, .link_libc = true });
++    const so_opts = b.addOptions();
++    so_opts.addOption([]const u8, "xgrammar", xgrammar);
++    so.addOptions("build_options", so_opts);
++    const so_test = b.addTest(.{ .root_module = so });
++    if (xgrammar.len > 0) so_opts.addOptionPath("so_lib", tfsoShared(b, host, xgrammar)) else so_opts.addOption([]const u8, "so_lib", "");
++    so_opts.addOption([]const u8, "so_lib_runtime", so_runtime);
++    step.dependOn(&b.addRunArtifact(so_test).step);
+     const cuda = runtime(b, host, .debug, &.{});
+     const mods = family(b, host, .debug, cuda, draft_ids);
+     const eng = engines(b, host, .debug, cuda, mods.lanes, mods.nemotron, mods.core);
+@@ -268,7 +281,7 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
+     };
+     const cuda = runtime(b, target, .fast, if (prebuilt != null) &images else &.{});
+     const mods = family(b, target, .fast, cuda, draft_ids);
+-    return nativeServer(b, target, .fast, cuda, mods.lanes, mods.nemotron, mods.core, mods.tokenizer, build_options, false);
++    return nativeServer(b, target, .fast, cuda, mods.lanes, mods.nemotron, mods.core, mods.tokenizer, build_options, "", "", false);
+ }
+ 
+ /// Validate the complete named input set, including images unused by today's server.
+@@ -277,3 +290,29 @@ pub fn checkDistFatbins(b: *std.Build, dir: []const u8) *std.Build.Step {
+     for (kernels) |k| if (!k.opt_in) check.addFileArg(b.graph.cwdRelativePath(b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{k.name}) })));
+     return &check.step;
+ }
++
++/// The structured-output shim as a static archive: g++ against libstdc++ (the toolchain the image
++/// also builds xgrammar with) compiles tfso.cc against the xgrammar prefix; ar packs it. Not
++/// addCSourceFile: that compiles with Zig clang and libc++ headers, and the shim objects would
++/// then meet xgrammar across two C++ runtimes.
++
++
++
++/// The structured-output shim as a shared library: g++ compiles it against xgrammar and links its
++/// C++ runtime statically, so the result has no libstdc++ dependency and needs no linker path.
++/// Zig loads it at run time (std.DynLib); a missing library leaves the engine without structured
++/// output instead of failing to link. Static linking through Zig's lld was not viable: the
++/// static libstdc++ archive is GCC-LTO, which lld cannot read.
++fn tfsoShared(b: *std.Build, target: std.Build.ResolvedTarget, xgrammar: []const u8) std.Build.LazyPath {
++    _ = target;
++    const script = b.fmt(
++        "set -e; g++ -std=c++17 -O2 -fPIC -shared -Wl,-z,defs -Wl,-soname,libtfso.so " ++
++            "-static-libstdc++ -static-libgcc -I{s}/include -o \"$2\" \"$1\" {s}/lib/libxgrammar.a; " ++
++            "nm -D --defined-only \"$2\" | grep -q tfso_init || {{ echo 'tfso_init not exported' >&2; exit 1; }}; " ++
++            "echo tfso-so-ok",
++        .{ xgrammar, xgrammar },
++    );
++    const run = b.addSystemCommand(&.{ "sh", "-c", script, "tfso" });
++    run.addFileArg(b.path("zig/src/core/structure/tfso.cc"));
++    return run.addOutputFileArg("libtfso.so");
++}
+diff --git a/zig/src/core/engine_api.zig b/zig/src/core/engine_api.zig
+index 2a50f6f9d1367492557c39cba77ce38160a290d1..197ebb8109bc61d5de781025635e83b8c87859c8 100644
+--- a/zig/src/core/engine_api.zig
++++ b/zig/src/core/engine_api.zig
+@@ -39,6 +39,10 @@ pub const CallGate = struct {
+     lex: CallLex,
+ };
+ 
++/// The matcher a structured reply's tokens are drawn under: the lane core's table (a family drives the shim
++/// through it, so only the server links the library).
++pub const StructureOps = lanes.StructureOps;
++
+ /// Same signatures as lanes/call_gate.zig Lex.
+ pub const CallLex = struct {
+     ctx: *anyopaque,
+@@ -54,6 +58,13 @@ pub const Structure = struct {
+     text: []const u8 = "",
+     /// With thinking on, the grammar starts after this token.
+     after: ?u32 = null,
++    /// The compiled grammar, when the server compiled it at admission (Info.structures).
++    handle: ?*anyopaque = null,
++    /// Ids of whitespace tokens the bounded leading-whitespace phase may emit before the grammar
++    /// engages (a reply that writes "\n\n" after its think block).
++    ws_ids: []const u32 = &.{},
++    /// The family's matcher operations over `handle` (null: the engine cannot enforce the grammar).
++    ops: ?*const StructureOps = null,
+ };
+ 
+ /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
+diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
+index 3367d54f1467dfd93c0f40518e6a39ec6dae5ca5..fae155ad47c9c2b8b7e7f85b5fbe8cf9f51404ea 100644
+--- a/zig/src/core/lane_host.zig
++++ b/zig/src/core/lane_host.zig
+@@ -628,6 +628,14 @@ pub const LaneHost = struct {
+                 .tail = c.tail,
+                 .lex = .{ .ctx = c.lex.ctx, .blank = c.lex.blank, .text = c.lex.text, .encode = c.lex.encode },
+             } else null,
++            .structure = if (r.structure) |s| .{
++                .kind = @intFromEnum(s.kind),
++                .text = s.text,
++                .after = if (s.after) |t| @intCast(t) else -1,
++                .handle = s.handle,
++                .ws_ids = s.ws_ids,
++                .ops = s.ops,
++            } else null,
+             .chunks = r.chunks,
+             .reuse = reuse,
+             .images = r.images,
+diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
+index b7c8e13091c20a81ece4f88c833453266859db65..91f56ffb5486e93e481fa737027940201571f538 100644
+--- a/zig/src/core/lanes/lanes.zig
++++ b/zig/src/core/lanes/lanes.zig
+@@ -26,6 +26,7 @@ pub const Engine = engine.Engine;
+ pub const Config = config.Config;
+ pub const Model = config.Model;
+ pub const Stream = stream.Stream;
++pub const StructureOps = stream.StructureOps;
+ pub const Sampling = sampling.Sampling;
+ pub const SuffixLookup = proposer.SuffixLookup;
+ 
+diff --git a/zig/src/core/lanes/stream.zig b/zig/src/core/lanes/stream.zig
+index 2e17c40c9f2976739d33b3a4abd59aadf8795a11..70fbf283b9c5a4fe154aabce3957a00e44cbacd4 100644
+--- a/zig/src/core/lanes/stream.zig
++++ b/zig/src/core/lanes/stream.zig
+@@ -8,6 +8,20 @@ const Proposer = @import("proposer.zig").Proposer;
+ const Sampling = @import("sampling.zig").Sampling;
+ const State = @import("depth.zig").State;
+ 
++/// A structured reply's matcher, as a family drives it (the server's So builds the table over its shim): created
++/// from the request's compiled grammar, filled with the next token's mask, advanced with each emitted token, freed
++/// when the stream ends. The context and the matcher are opaque.
++pub const StructureOps = struct {
++    ctx: *anyopaque,
++    /// A matcher over the compiled grammar, null when the shim could not make one.
++    create: *const fn (ctx: *anyopaque, grammar: ?*anyopaque) ?*anyopaque,
++    /// The next token's mask into the words (one bit an id): 1 applied, 0 every id allowed, -1 the shim failed.
++    fill: *const fn (m: *anyopaque, bits: []i32) i32,
++    accept: *const fn (m: *anyopaque, id: u32) bool,
++    terminated: *const fn (m: *anyopaque) bool,
++    free: *const fn (m: *anyopaque) void,
++};
++
+ pub const Reason = enum {
+     none,
+     stop,
+@@ -147,6 +161,20 @@ pub const Spec = struct {
+         tail: []const u8 = "",
+         lex: call_gate.Lex,
+     } = null,
++    /// The reply's grammar (response_format / guided_*).
++    structure: ?StructureSpec = null,
++};
++
++/// A reply's grammar: its kind, text, the token it starts after (-1: from the first token), the compiled
++/// grammar and the matcher operations over it, and the ids of whitespace tokens the bounded leading-whitespace
++/// phase may emit before the grammar engages.
++pub const StructureSpec = struct {
++    kind: u8,
++    text: []const u8 = "",
++    after: i64 = -1,
++    handle: ?*anyopaque = null,
++    ws_ids: []const u32 = &.{},
++    ops: ?*const StructureOps = null,
+ };
+ 
+ /// Decode rounds for the other live streams between two prompt chunks (Stream.between).
+@@ -213,6 +241,8 @@ pub const Stream = struct {
+     granted: ?u32 = null,
+     copy_width: ?u32 = null,
+     gate: ?call_gate.Gate = null,
++    /// The reply's grammar (null: unconstrained), as the family's mask reads it.
++    structure: ?StructureSpec = null,
+ 
+     pub fn init(gpa: Allocator, spec: Spec) !Stream {
+         var s: Stream = .{
+@@ -221,8 +251,9 @@ pub const Stream = struct {
+             .max_new = spec.max_new,
+             .eos = spec.eos,
+             .sampling = spec.sampling,
+-            .drafts = spec.drafts,
+-            .proposer = if (spec.drafts) spec.proposer else null,
++            // a constrained stream never drafts: a drafted row is a token the grammar might not allow
++            .drafts = spec.drafts and spec.structure == null,
++            .proposer = if (spec.drafts and spec.structure == null) spec.proposer else null,
+             .stop_check = spec.stop_check,
+             .cancel_check = spec.cancel_check,
+             .think_budget = spec.think_budget,
+@@ -233,6 +264,7 @@ pub const Stream = struct {
+             .chunks = spec.chunks,
+             .reuse = spec.reuse,
+             .images = spec.images,
++            .structure = spec.structure,
+         };
+         if (spec.call) |c| {
+             s.gate = call_gate.Gate.afterPrompt(spec.prompt, c.opener, c.think_open, c.think_end, c.lex, c.lead, c.names, c.tail);
+diff --git a/zig/src/core/structure.zig b/zig/src/core/structure.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..73082fae312a1e9c03263298e70a309bb3d5e917
+--- /dev/null
++++ b/zig/src/core/structure.zig
+@@ -0,0 +1,253 @@
++//! The structured-output compile cache: a (kind, grammar text) -> compiled grammar map bounded by
++//! bytes, deduplicated across concurrent requests, and compiled off the caller's thread. Every
++//! compile goes through the shim in core/structure/api.zig. The key holds the whole text and is
++//! compared as a string, so a hash collision can never return the wrong grammar.
++const std = @import("std");
++const api_mod = @import("structure/api.zig");
++
++pub const Api = api_mod.Api;
++pub const Kind = enum { json, json_schema, regex, choice, grammar };
++
++pub const Grammar = struct { ptr: *anyopaque, bytes: usize };
++
++const Entry = struct { g: Grammar, key: []u8, tick: u64 };
++
++const Job = struct {
++    /// 0 running, 1 done, 2 failed.
++    state: std.atomic.Value(u8) = .init(0),
++    g: ?Grammar = null,
++    errlen: usize = 0,
++    errbuf: [512]u8 = std.mem.zeroes([512]u8),
++};
++
++pub const Cache = struct {
++    a: std.mem.Allocator,
++    io: std.Io,
++    api: *Api,
++    ctx: ?*anyopaque,
++    limit: usize,
++    mutex: std.Io.Mutex = .init,
++    map: std.StringHashMapUnmanaged(Entry) = .empty,
++    inflight: std.StringHashMapUnmanaged(*Job) = .empty,
++    jobs: std.ArrayListUnmanaged(*Job) = .empty,
++    tick: u64 = 0,
++    total_bytes: usize = 0,
++
++    pub fn init(a: std.mem.Allocator, io: std.Io, api: *Api, ctx: ?*anyopaque, limit: usize) Cache {
++        return .{ .a = a, .io = io, .api = api, .ctx = ctx, .limit = limit };
++    }
++
++    pub fn deinit(self: *Cache) void {
++        var it = self.map.iterator();
++        while (it.next()) |e| {
++            self.api.grammar_free(e.value_ptr.g.ptr);
++            self.a.free(e.value_ptr.key);
++        }
++        self.map.deinit(self.a);
++        self.inflight.deinit(self.a);
++        for (self.jobs.items) |job| self.a.destroy(job);
++        self.jobs.deinit(self.a);
++    }
++
++    pub fn currentBytes(self: *Cache) usize {
++        self.mutex.lockUncancelable(self.io);
++        defer self.mutex.unlock(self.io);
++        return self.total_bytes;
++    }
++
++    /// The compiled grammar for (kind, text): from the cache, from an in-flight compile of the
++    /// same key, or from a new worker thread. Returns error.Timeout when the compile outlives
++    /// timeout_ms (the worker finishes in the background and its result is dropped).
++    pub fn getOrCompile(self: *Cache, kind: Kind, text: []const u8, err: []u8, timeout_ms: u64) !*anyopaque {
++        const key = try std.fmt.allocPrint(self.a, "{s}\x00{s}", .{ @tagName(kind), text });
++        var owner = false;
++
++        self.mutex.lockUncancelable(self.io);
++        if (self.map.getPtr(key)) |e| {
++            self.tick += 1;
++            e.tick = self.tick;
++            const ptr = e.g.ptr;
++            self.mutex.unlock(self.io);
++            self.a.free(key);
++            return ptr;
++        }
++        var job: *Job = undefined;
++        if (self.inflight.get(key)) |existing| {
++            job = existing;
++        } else {
++            job = self.a.create(Job) catch |e| {
++                self.mutex.unlock(self.io);
++                self.a.free(key);
++                return e;
++            };
++            job.* = .{};
++            self.jobs.append(self.a, job) catch |e| {
++                self.a.destroy(job);
++                self.mutex.unlock(self.io);
++                self.a.free(key);
++                return e;
++            };
++            self.inflight.put(self.a, key, job) catch |e| {
++                self.mutex.unlock(self.io);
++                self.a.free(key);
++                return e;
++            };
++            owner = true;
++        }
++        self.mutex.unlock(self.io);
++
++        if (owner) {
++            const t = std.Thread.spawn(.{}, compileJob, .{ self, kind, text, key, job }) catch |e| {
++                self.finishJob(key, job, null, "could not spawn a compile thread");
++                self.a.free(key);
++                return e;
++            };
++            t.detach();
++        } else {
++            // the owner's worker owns and frees this key
++            self.a.free(key);
++        }
++
++        var waited: u64 = 0;
++        while (job.state.load(.acquire) == 0) {
++            if (waited >= timeout_ms) return error.Timeout;
++            std.Io.sleep(self.io, .fromMilliseconds(1), .awake) catch {};
++            waited += 1;
++        }
++        if (job.state.load(.acquire) == 2) {
++            const n = @min(job.errlen, err.len);
++            @memcpy(err[0..n], job.errbuf[0..n]);
++            return error.CompileFailed;
++        }
++        return job.g.?.ptr;
++    }
++
++    fn compileJob(self: *Cache, kind: Kind, text: []const u8, key: []u8, job: *Job) void {
++        var msg: [512]u8 = std.mem.zeroes([512]u8);
++        if (self.compileOne(kind, text, &msg)) |g| {
++            self.finishJob(key, job, g, "");
++        } else |_| {
++            self.finishJob(key, job, null, std.mem.sliceTo(&msg, 0));
++        }
++        self.a.free(key);
++    }
++
++    fn compileOne(self: *Cache, kind: Kind, text: []const u8, msg: []u8) !Grammar {
++        const ztext = try self.a.allocSentinel(u8, text.len, 0);
++        @memcpy(ztext[0..text.len], text);
++        defer self.a.free(ztext);
++        const ptr = switch (kind) {
++            .json => self.api.compile_json(self.ctx, "{\"type\":\"object\"}", 1, msg.ptr, @intCast(msg.len)),
++            .json_schema => self.api.compile_json(self.ctx, ztext.ptr, 1, msg.ptr, @intCast(msg.len)),
++            .regex => self.api.compile_regex(self.ctx, ztext.ptr, msg.ptr, @intCast(msg.len)),
++            .choice => blk: {
++                const ebnf = try choiceGrammar(self.a, text, msg);
++                defer self.a.free(ebnf);
++                const zebnf = try self.a.allocSentinel(u8, ebnf.len, 0);
++                @memcpy(zebnf[0..ebnf.len], ebnf);
++                defer self.a.free(zebnf);
++                break :blk self.api.compile_grammar(self.ctx, zebnf.ptr, msg.ptr, @intCast(msg.len));
++            },
++            .grammar => self.api.compile_grammar(self.ctx, ztext.ptr, msg.ptr, @intCast(msg.len)),
++        };
++        if (ptr == null) return error.CompileFailed;
++        return .{ .ptr = ptr.?, .bytes = self.api.grammar_bytes(ptr.?) };
++    }
++
++    fn finishJob(self: *Cache, key: []u8, job: *Job, g: ?Grammar, msg: []const u8) void {
++        self.mutex.lockUncancelable(self.io);
++        defer self.mutex.unlock(self.io);
++        if (g) |gram| {
++            const k = self.a.dupe(u8, key) catch {
++                job.state.store(2, .release);
++                _ = self.inflight.fetchRemove(key);
++                return;
++            };
++            if (self.map.getPtr(k)) |e| {
++                // a concurrent insert won the race: keep the older grammar, drop ours
++                self.a.free(k);
++                self.api.grammar_free(gram.ptr);
++                job.g = e.g;
++                job.state.store(1, .release);
++            } else {
++                self.tick += 1;
++                self.map.put(self.a, k, .{ .g = gram, .key = k, .tick = self.tick }) catch {
++                    self.a.free(k);
++                    self.api.grammar_free(gram.ptr);
++                    job.state.store(2, .release);
++                    _ = self.inflight.fetchRemove(key);
++                    return;
++                };
++                self.total_bytes += gram.bytes;
++                self.evictLocked();
++                job.g = gram;
++                job.state.store(1, .release);
++            }
++        } else {
++            const n = @min(msg.len, job.errbuf.len);
++            @memcpy(job.errbuf[0..n], msg[0..n]);
++            job.errlen = n;
++            job.state.store(2, .release);
++        }
++        _ = self.inflight.fetchRemove(key);
++    }
++
++    fn evictLocked(self: *Cache) void {
++        if (self.limit == 0) return;
++        while (self.total_bytes > self.limit and self.map.count() > 0) {
++            var oldest_key: ?[]const u8 = null;
++            var oldest_tick: u64 = std.math.maxInt(u64);
++            var it = self.map.iterator();
++            while (it.next()) |e| {
++                if (e.value_ptr.tick < oldest_tick) {
++                    oldest_tick = e.value_ptr.tick;
++                    oldest_key = e.key_ptr.*;
++                }
++            }
++            const k = oldest_key orelse break;
++            if (self.map.fetchRemove(k)) |kv| {
++                self.total_bytes -= kv.value.g.bytes;
++                self.api.grammar_free(kv.value.g.ptr);
++                self.a.free(kv.value.key);
++            }
++        }
++    }
++};
++
++/// guided_choice: a JSON array of strings becomes an EBNF alternation of quoted literals, so the
++/// grammar matches the JSON string form ("a" with its quotes) that a reply must produce.
++pub fn choiceGrammar(a: std.mem.Allocator, choices_json: []const u8, msg: []u8) ![]u8 {
++    const parsed = std.json.parseFromSlice(std.json.Value, a, choices_json, .{}) catch {
++        const t = "choice is not valid JSON";
++        @memcpy(msg[0..@min(msg.len, t.len)], t);
++        return error.BadChoice;
++    };
++    defer parsed.deinit();
++    if (parsed.value != .array or parsed.value.array.items.len == 0) {
++        const t = "choice must be a non-empty array";
++        @memcpy(msg[0..@min(msg.len, t.len)], t);
++        return error.BadChoice;
++    }
++    var out: std.ArrayList(u8) = .empty;
++    errdefer out.deinit(a);
++    try out.appendSlice(a, "root ::= ");
++    for (parsed.value.array.items, 0..) |item, i| {
++        if (i > 0) try out.appendSlice(a, " | ");
++        if (item != .string) {
++            const t = "choice entries must be strings";
++            @memcpy(msg[0..@min(msg.len, t.len)], t);
++            return error.BadChoice;
++        }
++        try out.append(a, '"'); // EBNF string open
++        try out.append(a, '\\');
++        try out.append(a, '"'); // the JSON string's opening quote
++        for (item.string) |ch| {
++            if (ch == '"' or ch == '\\') try out.append(a, '\\');
++            try out.append(a, ch);
++        }
++        try out.append(a, '\\');
++        try out.append(a, '"'); // the JSON string's closing quote
++        try out.append(a, '"'); // EBNF string close
++    }
++    return out.toOwnedSlice(a);
++}
+diff --git a/zig/src/core/structure/api.zig b/zig/src/core/structure/api.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..29001b6980afad9e55fd3ff4b0ca44438816e525
+--- /dev/null
++++ b/zig/src/core/structure/api.zig
+@@ -0,0 +1,56 @@
++//! The shim's symbols, resolved from the shared library g++ builds (core/structure/tfso.cc).
++//! Loading at run time keeps the C++/Zig boundary at plain C and lets a build without the library
++//! simply not advertise structured output. Missing library or symbol = error, never a crash.
++const std = @import("std");
++
++pub const InitFn = *const fn ([*]const ?[*]const u8, [*]const i32, i32, i32, ?[*]const i32, i32, [*]u8, i32) callconv(.c) ?*anyopaque;
++pub const CompileJsonFn = *const fn (?*anyopaque, [*:0]const u8, i32, [*]u8, i32) callconv(.c) ?*anyopaque;
++pub const CompileTextFn = *const fn (?*anyopaque, [*:0]const u8, [*]u8, i32) callconv(.c) ?*anyopaque;
++pub const GrammarBytesFn = *const fn (?*anyopaque) callconv(.c) usize;
++pub const MatcherCreateFn = *const fn (?*anyopaque, ?*anyopaque, [*]u8, i32) callconv(.c) ?*anyopaque;
++pub const FillFn = *const fn (?*anyopaque, [*]i32) callconv(.c) i32;
++pub const AcceptFn = *const fn (?*anyopaque, i32) callconv(.c) i32;
++pub const TerminatedFn = *const fn (?*anyopaque) callconv(.c) i32;
++pub const MatcherFreeFn = *const fn (?*anyopaque) callconv(.c) void;
++pub const GrammarFreeFn = *const fn (?*anyopaque) callconv(.c) void;
++pub const CtxFreeFn = *const fn (?*anyopaque) callconv(.c) void;
++
++pub const Api = struct {
++    lib: std.DynLib,
++    init: InitFn,
++    compile_json: CompileJsonFn,
++    compile_regex: CompileTextFn,
++    compile_grammar: CompileTextFn,
++    grammar_bytes: GrammarBytesFn,
++    matcher_create: MatcherCreateFn,
++    fill: FillFn,
++    accept: AcceptFn,
++    terminated: TerminatedFn,
++    matcher_free: MatcherFreeFn,
++    grammar_free: GrammarFreeFn,
++    ctx_free: CtxFreeFn,
++
++    pub fn load(path: []const u8) !Api {
++        var lib = try std.DynLib.open(path);
++        errdefer lib.close();
++        return .{
++            .lib = lib,
++            .init = lib.lookup(InitFn, "tfso_init") orelse return error.MissingSymbol,
++            .compile_json = lib.lookup(CompileJsonFn, "tfso_compile_json_schema") orelse return error.MissingSymbol,
++            .compile_regex = lib.lookup(CompileTextFn, "tfso_compile_regex") orelse return error.MissingSymbol,
++            .compile_grammar = lib.lookup(CompileTextFn, "tfso_compile_grammar") orelse return error.MissingSymbol,
++            .grammar_bytes = lib.lookup(GrammarBytesFn, "tfso_grammar_bytes") orelse return error.MissingSymbol,
++            .matcher_create = lib.lookup(MatcherCreateFn, "tfso_matcher_create") orelse return error.MissingSymbol,
++            .fill = lib.lookup(FillFn, "tfso_fill_bitmask") orelse return error.MissingSymbol,
++            .accept = lib.lookup(AcceptFn, "tfso_accept_token") orelse return error.MissingSymbol,
++            .terminated = lib.lookup(TerminatedFn, "tfso_terminated") orelse return error.MissingSymbol,
++            .matcher_free = lib.lookup(MatcherFreeFn, "tfso_matcher_free") orelse return error.MissingSymbol,
++            .grammar_free = lib.lookup(GrammarFreeFn, "tfso_grammar_free") orelse return error.MissingSymbol,
++            .ctx_free = lib.lookup(CtxFreeFn, "tfso_ctx_free") orelse return error.MissingSymbol,
++        };
++    }
++
++    pub fn close(self: *Api) void {
++        self.lib.close();
++    }
++};
+diff --git a/zig/src/core/structure/tfso.cc b/zig/src/core/structure/tfso.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..739b65bfb47ec99270db2f2499ddc53f4854db83
+--- /dev/null
++++ b/zig/src/core/structure/tfso.cc
+@@ -0,0 +1,243 @@
++//! The shim's implementation: xgrammar 0.2.2 behind tfso.h. C++ stays on this side of the
++//! boundary; only POD crosses to Zig. Every xgrammar call is wrapped: the library throws
++//! (XGrammarError and friends) instead of returning status, so an uncaught exception would
++//! unwind through Zig frames.
++#include "tfso.h"
++
++#include <dlpack/dlpack.h>
++#include <xgrammar/compiler.h>
++#include <xgrammar/grammar.h>
++#include <xgrammar/matcher.h>
++#include <xgrammar/tokenizer_info.h>
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++namespace {
++
++void set_err(char* err, int cap, const char* what) {
++    if (err == nullptr || cap <= 0) return;
++    std::snprintf(err, static_cast<size_t>(cap), "%s", what != nullptr ? what : "xgrammar error");
++}
++
++void set_err(char* err, int cap, const std::exception& e) { set_err(err, cap, e.what()); }
++
++/// TF_DS_SO_TRACE=1: name every input before compiling it. xgrammar's fatal path can abort the
++/// process, so the last line on stderr is the only record of what it refused.
++void tfso_trace(const char* what, const char* detail) {
++    if (std::getenv("TF_DS_SO_TRACE") == nullptr) return;
++    std::fprintf(stderr, "tfso: %s: %.400s\n", what, detail != nullptr ? detail : "");
++}
++
++}  // namespace
++
++struct tfso_ctx {
++    xgrammar::TokenizerInfo ti;
++    std::unique_ptr<xgrammar::GrammarCompiler> compiler;
++    int32_t padded;  // the model's padded vocabulary: the bitmask's width
++};
++
++struct tfso_grammar {
++    xgrammar::CompiledGrammar g;
++    explicit tfso_grammar(xgrammar::CompiledGrammar&& c) : g(std::move(c)) {}
++};
++
++struct tfso_matcher {
++    // The matcher holds its own copy of the compiled grammar (shared_ptr pimpl), so eviction
++    // from the Zig-side cache cannot free it while this matcher lives.
++    std::unique_ptr<xgrammar::GrammarMatcher> m;
++    int words;  // ceil(padded_vocab / 32): the caller's bitmask length
++};
++
++extern "C" {
++
++tfso_ctx* tfso_init(const char* const* bytes, const int32_t* lens, int32_t n,
++                    int32_t padded_vocab, const int32_t* stops, int32_t nstops,
++                    char* err, int cap) {
++    try {
++        if (bytes == nullptr || lens == nullptr || n <= 0) {
++            set_err(err, cap, "empty vocabulary");
++            return nullptr;
++        }
++        std::vector<std::string> vocab;
++        vocab.reserve(static_cast<size_t>(n));
++        for (int32_t i = 0; i < n; ++i) {
++            const int32_t len = lens[i];
++            if (len < 0 || (len > 0 && bytes[i] == nullptr)) {
++                set_err(err, cap, "bad vocabulary entry");
++                return nullptr;
++            }
++            vocab.emplace_back(len > 0 ? bytes[i] : "", static_cast<size_t>(len));
++        }
++        std::optional<std::vector<int32_t>> stop_ids;
++        if (stops != nullptr && nstops > 0)
++            stop_ids = std::vector<int32_t>(stops, stops + nstops);
++        auto* ctx = new tfso_ctx{
++            xgrammar::TokenizerInfo(std::move(vocab), xgrammar::VocabType::RAW,
++                                    static_cast<int>(padded_vocab), std::move(stop_ids), false),
++            nullptr,
++            padded_vocab,
++        };
++        ctx->compiler = std::make_unique<xgrammar::GrammarCompiler>(ctx->ti);
++        return ctx;
++    } catch (const std::exception& e) {
++        set_err(err, cap, e);
++        return nullptr;
++    } catch (...) {
++        set_err(err, cap, "unknown xgrammar failure in init");
++        return nullptr;
++    }
++}
++
++tfso_grammar* tfso_compile_json_schema(tfso_ctx* ctx, const char* schema, int strict,
++                                       char* err, int cap) {
++    try {
++        if (ctx == nullptr || schema == nullptr) {
++            set_err(err, cap, "no context or schema");
++            return nullptr;
++        }
++        tfso_trace("json_schema", schema);
++        auto g = ctx->compiler->CompileJSONSchema(std::string(schema),
++                                                  /*any_whitespace=*/false,
++                                                  /*indent=*/std::nullopt,
++                                                  /*separators=*/std::nullopt,
++                                                  /*strict_mode=*/strict != 0);
++        return new tfso_grammar(std::move(g));
++    } catch (const std::exception& e) {
++        set_err(err, cap, e);
++        return nullptr;
++    } catch (...) {
++        set_err(err, cap, "unknown xgrammar failure in CompileJSONSchema");
++        return nullptr;
++    }
++}
++
++tfso_grammar* tfso_compile_regex(tfso_ctx* ctx, const char* pattern, char* err, int cap) {
++    try {
++        if (ctx == nullptr || pattern == nullptr) {
++            set_err(err, cap, "no context or pattern");
++            return nullptr;
++        }
++        tfso_trace("regex", pattern);
++        auto g = ctx->compiler->CompileRegex(std::string(pattern));
++        return new tfso_grammar(std::move(g));
++    } catch (const std::exception& e) {
++        set_err(err, cap, e);
++        return nullptr;
++    } catch (...) {
++        set_err(err, cap, "unknown xgrammar failure in CompileRegex");
++        return nullptr;
++    }
++}
++
++tfso_grammar* tfso_compile_grammar(tfso_ctx* ctx, const char* ebnf, char* err, int cap) {
++    try {
++        if (ctx == nullptr || ebnf == nullptr) {
++            set_err(err, cap, "no context or grammar");
++            return nullptr;
++        }
++        tfso_trace("grammar", ebnf);
++        auto g = ctx->compiler->CompileGrammar(xgrammar::Grammar::FromEBNF(std::string(ebnf)));
++        return new tfso_grammar(std::move(g));
++    } catch (const std::exception& e) {
++        set_err(err, cap, e);
++        return nullptr;
++    } catch (...) {
++        set_err(err, cap, "unknown xgrammar failure in CompileGrammar");
++        return nullptr;
++    }
++}
++
++size_t tfso_grammar_bytes(tfso_grammar* g) {
++    if (g == nullptr) return 0;
++    try {
++        return g->g.MemorySizeBytes();
++    } catch (...) {
++        return 0;
++    }
++}
++
++void* tfso_matcher_create(tfso_ctx* ctx, tfso_grammar* g, char* err, int cap) {
++    try {
++        if (g == nullptr || ctx == nullptr) {
++            set_err(err, cap, "no grammar");
++            return nullptr;
++        }
++        auto* mt = new tfso_matcher{
++            std::make_unique<xgrammar::GrammarMatcher>(g->g),
++            static_cast<int>(xgrammar::GetBitmaskSize(static_cast<int>(ctx->padded))),
++        };
++        return mt;
++    } catch (const std::exception& e) {
++        set_err(err, cap, e);
++        return nullptr;
++    } catch (...) {
++        set_err(err, cap, "unknown xgrammar failure in matcher creation");
++        return nullptr;
++    }
++}
++
++int tfso_fill_bitmask(void* matcher, int32_t* words) {
++    auto* mt = static_cast<tfso_matcher*>(matcher);
++    if (mt == nullptr || words == nullptr) return -1;
++    try {
++        const int words_n = mt->words;
++        DLTensor t;
++        std::memset(&t, 0, sizeof(t));
++        t.device = DLDevice{kDLCPU, 0};
++        t.ndim = 1;
++        int64_t shape[1] = {words_n};
++        t.shape = shape;
++        t.strides = nullptr;
++        t.dtype = DLDataType{kDLInt, 32, 1};
++        t.byte_offset = 0;
++        t.data = words;
++        return mt->m->FillNextTokenBitmask(&t, 0, false) ? 1 : 0;
++    } catch (...) {
++        return -1;
++    }
++}
++
++int tfso_accept_token(void* matcher, int32_t id) {
++    auto* mt = static_cast<tfso_matcher*>(matcher);
++    if (mt == nullptr) return 0;
++    try {
++        return mt->m->AcceptToken(id) ? 1 : 0;
++    } catch (...) {
++        return 0;
++    }
++}
++
++int tfso_terminated(void* matcher) {
++    auto* mt = static_cast<tfso_matcher*>(matcher);
++    if (mt == nullptr) return 0;
++    try {
++        return mt->m->IsTerminated() ? 1 : 0;
++    } catch (...) {
++        return 0;
++    }
++}
++
++int tfso_rollback(void* matcher, int32_t n) {
++    auto* mt = static_cast<tfso_matcher*>(matcher);
++    if (mt == nullptr || n <= 0) return -1;
++    try {
++        mt->m->Rollback(n);
++        return 0;
++    } catch (...) {
++        return -1;
++    }
++}
++
++void tfso_matcher_free(void* matcher) { delete static_cast<tfso_matcher*>(matcher); }
++
++void tfso_grammar_free(tfso_grammar* g) { delete g; }
++
++void tfso_ctx_free(tfso_ctx* ctx) { delete ctx; }
++
++}  // extern "C"
+diff --git a/zig/src/core/structure/tfso.h b/zig/src/core/structure/tfso.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..23d6783d4ac59a20c5401e63ab8cc7a23deb8f43
+--- /dev/null
++++ b/zig/src/core/structure/tfso.h
+@@ -0,0 +1,57 @@
++//! The structured-output shim's C surface: xgrammar behind plain C so the Zig engine links it
++//! without a C++ ABI across the boundary. Every call that can fail takes an error buffer; the
++//! shim catches every xgrammar exception (it throws, it does not return status) and copies the
++//! message there. No global state: compile workers and the lane thread call in concurrently.
++#ifndef TFSO_H
++#define TFSO_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct tfso_ctx tfso_ctx;
++typedef struct tfso_grammar tfso_grammar;
++
++/// bytes[i]/lens[i] is token i's exact decoded bytes (RAW vocabulary); n real tokens, padded_vocab
++/// the model's padded vocabulary; stops are the stop/end ids. NULL on failure.
++tfso_ctx* tfso_init(const char* const* bytes, const int32_t* lens, int32_t n,
++                    int32_t padded_vocab, const int32_t* stops, int32_t nstops,
++                    char* err, int cap);
++
++/// JSON Schema, compiled compact (any_whitespace = false). strict 0/1 -> strict_mode.
++tfso_grammar* tfso_compile_json_schema(tfso_ctx* ctx, const char* schema, int strict,
++                                       char* err, int cap);
++tfso_grammar* tfso_compile_regex(tfso_ctx* ctx, const char* pattern, char* err, int cap);
++tfso_grammar* tfso_compile_grammar(tfso_ctx* ctx, const char* ebnf, char* err, int cap);
++
++/// CompiledGrammar::MemorySizeBytes (grammar + its adaptive mask cache).
++size_t tfso_grammar_bytes(tfso_grammar* g);
++
++/// A matcher for one request. NULL on failure.
++void* tfso_matcher_create(tfso_ctx* ctx, tfso_grammar* g, char* err, int cap);
++
++/// Fills the caller's int32 words ((vocab+31)/32, bit 1 = allowed). Returns 1 when the mask needs
++/// applying (not all-true), 0 when everything is allowed, -1 on error.
++int tfso_fill_bitmask(void* matcher, int32_t* words);
++
++/// bool: whether the token was accepted (0 = not allowed by the grammar).
++int tfso_accept_token(void* matcher, int32_t id);
++
++/// IsTerminated(): the grammar completed and its stop token was accepted.
++int tfso_terminated(void* matcher);
++
++/// v2 only (per-draft-step masks): nothing calls it with drafts off.
++int tfso_rollback(void* matcher, int32_t n);
++
++void tfso_matcher_free(void* matcher);
++void tfso_grammar_free(tfso_grammar* g);
++void tfso_ctx_free(tfso_ctx* ctx);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/zig/src/core/structure_test.zig b/zig/src/core/structure_test.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..f622a4fa44f059f7a9fc31847ef218c1ab473a97
+--- /dev/null
++++ b/zig/src/core/structure_test.zig
+@@ -0,0 +1,162 @@
++//! The structured-output shim's and cache's tests (core/structure.zig over xgrammar 0.2.2).
++//! The shim needs a local xgrammar build: `zig build test -Dxgrammar=$HOME/opt/xgrammar-0.2.2`.
++//! Without the flag the shim tests skip, so a bare host still runs the rest of the suite.
++const std = @import("std");
++const bo = @import("build_options");
++const structure = @import("structure.zig");
++const api_mod = @import("structure/api.zig");
++
++const so_path: []const u8 = bo.so_lib;
++const enabled = so_path.len > 0;
++const CAP: i32 = 512;
++
++/// Twenty tokens: JSON punctuation, a plain word, digits, whitespace, and fillers.
++const vocab = [_][]const u8{
++    "{", "}", ":", ",", "\"", "a", "b", "0", "1", " ",
++    "x", "y", "z", "q", "w", "e", "r", "t", "u", "i",
++};
++const padded = 32;
++
++const Fixture = struct {
++    api: api_mod.Api,
++    ctx: ?*anyopaque,
++
++    fn open() !Fixture {
++        var api = try api_mod.Api.load(so_path);
++        errdefer api.close();
++        var ptrs: [vocab.len]?[*]const u8 = undefined;
++        var lens: [vocab.len]i32 = undefined;
++        for (vocab, 0..) |v, i| {
++            ptrs[i] = v.ptr;
++            lens[i] = @intCast(v.len);
++        }
++        var err: [CAP]u8 = undefined;
++        const ctx = api.init(&ptrs, &lens, @intCast(vocab.len), padded, null, 0, &err, CAP) orelse
++            return error.InitFailed;
++        return .{ .api = api, .ctx = ctx };
++    }
++
++    fn close(self: *Fixture) void {
++        self.api.ctx_free(self.ctx);
++        self.api.close();
++    }
++};
++
++fn bitSet(words: []const i32, id: usize) bool {
++    const w = id / 32;
++    const b: u5 = @intCast(id % 32);
++    if (w >= words.len) return false;
++    return (words[w] >> b) & 1 == 1;
++}
++
++test "shim tests are skipped without -Dxgrammar" {
++    if (comptime !enabled) return error.SkipZigTest;
++    try std.testing.expect(comptime enabled);
++}
++
++test "init, compile a schema, and the first mask" {
++    if (comptime !enabled) return error.SkipZigTest;
++    if (comptime enabled) {
++        var fx = try Fixture.open();
++        defer fx.close();
++        var err: [CAP]u8 = undefined;
++        const g = fx.api.compile_json(fx.ctx, "{\"type\":\"object\"}", 1, &err, CAP) orelse {
++            std.debug.print("compile failed: {s}\n", .{std.mem.sliceTo(&err, 0)});
++            return error.CompileFailed;
++        };
++        defer fx.api.grammar_free(g);
++        try std.testing.expect(fx.api.grammar_bytes(g) > 0);
++
++        const m = fx.api.matcher_create(fx.ctx, g, &err, CAP) orelse return error.MatcherFailed;
++        defer fx.api.matcher_free(m);
++        var words: [1]i32 = .{0};
++        try std.testing.expect(fx.api.fill(m, &words) == 1);
++        try std.testing.expect(bitSet(&words, 0)); // "{"
++        try std.testing.expect(!bitSet(&words, 5)); // "a": not at the start of compact JSON
++        try std.testing.expect(fx.api.accept(m, 0) == 1); // "{"
++        try std.testing.expect(fx.api.accept(m, 1) == 1); // "}" closes the empty object
++        try std.testing.expect(fx.api.terminated(m) == 0); // the stop token has not been accepted
++    }
++}
++
++test "a compile failure carries the compiler's message, per call" {
++    if (comptime !enabled) return error.SkipZigTest;
++    if (comptime enabled) {
++        var fx = try Fixture.open();
++        defer fx.close();
++        var e1: [CAP]u8 = undefined;
++        var e2: [CAP]u8 = undefined;
++        try std.testing.expect(fx.api.compile_json(fx.ctx, "{\"type\":42}", 1, &e1, CAP) == null);
++        try std.testing.expect(fx.api.compile_json(fx.ctx, "not a schema at all", 1, &e2, CAP) == null);
++        const m1 = std.mem.sliceTo(&e1, 0);
++        const m2 = std.mem.sliceTo(&e2, 0);
++        try std.testing.expect(m1.len > 0 and m2.len > 0);
++        try std.testing.expect(!std.mem.eql(u8, m1, m2));
++    }
++}
++
++test "regex and EBNF grammars compile" {
++    if (comptime !enabled) return error.SkipZigTest;
++    if (comptime enabled) {
++        var fx = try Fixture.open();
++        defer fx.close();
++        var err: [CAP]u8 = undefined;
++        const re = fx.api.compile_regex(fx.ctx, "[A-Z]{2}-[0-9]{3}", &err, CAP) orelse return error.RegexFailed;
++        fx.api.grammar_free(re);
++        const eb = fx.api.compile_grammar(fx.ctx, "root ::= \"answer=\" [0-9]+", &err, CAP) orelse return error.EbnfFailed;
++        fx.api.grammar_free(eb);
++    }
++}
++
++test "choice becomes an EBNF alternation of quoted literals" {
++    const a = std.testing.allocator;
++    var msg: [CAP]u8 = undefined;
++    const g = try structure.choiceGrammar(a, "[\"a\",\"b\\\"c\"]", &msg);
++    defer a.free(g);
++    try std.testing.expectEqualStrings("root ::= \"\\\"a\\\"\" | \"\\\"b\\\"c\\\"\"", g);
++}
++
++test "the cache returns one grammar per (kind, text) and dedupes concurrent compiles" {
++    if (comptime !enabled) return error.SkipZigTest;
++    if (comptime enabled) {
++        var fx = try Fixture.open();
++        defer fx.close();
++        var cache = structure.Cache.init(std.testing.allocator, std.testing.io, &fx.api, fx.ctx, 4 << 20);
++        defer cache.deinit();
++        var err: [CAP]u8 = undefined;
++
++        const a1 = try cache.getOrCompile(.json_schema, "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}}", &err, 5000);
++        const a2 = try cache.getOrCompile(.json_schema, "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}}", &err, 5000);
++        try std.testing.expectEqual(a1, a2); // same text: one grammar
++        const b1 = try cache.getOrCompile(.json_schema, "{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"string\"}}}", &err, 5000);
++        try std.testing.expect(a1 != b1); // different text, same shape: a different grammar
++        try std.testing.expect(cache.currentBytes() > 0);
++    }
++}
++
++test "an invalid schema through the cache reports the compiler's message" {
++    if (comptime !enabled) return error.SkipZigTest;
++    if (comptime enabled) {
++        var fx = try Fixture.open();
++        defer fx.close();
++        var cache = structure.Cache.init(std.testing.allocator, std.testing.io, &fx.api, fx.ctx, 1 << 20);
++        defer cache.deinit();
++        var err: [CAP]u8 = std.mem.zeroes([CAP]u8);
++        try std.testing.expectError(error.CompileFailed, cache.getOrCompile(.json_schema, "{\"type\":42}", &err, 5000));
++        try std.testing.expect(std.mem.sliceTo(&err, 0).len > 0);
++    }
++}
++
++test "the byte bound evicts the least recently used grammar" {
++    if (comptime !enabled) return error.SkipZigTest;
++    if (comptime enabled) {
++        var fx = try Fixture.open();
++        defer fx.close();
++        var cache = structure.Cache.init(std.testing.allocator, std.testing.io, &fx.api, fx.ctx, 1);
++        defer cache.deinit();
++        var err: [CAP]u8 = undefined;
++        _ = try cache.getOrCompile(.json_schema, "{\"type\":\"object\"}", &err, 5000);
++        _ = try cache.getOrCompile(.json_schema, "{\"type\":\"object\",\"properties\":{\"z\":{\"type\":\"number\"}}}", &err, 5000);
++        try std.testing.expect(cache.currentBytes() <= 1);
++    }
++}
+diff --git a/zig/src/families/dsv41/dsv41.zig b/zig/src/families/dsv41/dsv41.zig
+index 40c63fe2bb3c7084d87aecfbb21dbc00e005406b..b3b3bfb3af8c50fb6e89c5310274de439ec77df6 100644
+--- a/zig/src/families/dsv41/dsv41.zig
++++ b/zig/src/families/dsv41/dsv41.zig
+@@ -96,6 +96,7 @@ test {
+     refAll(text);
+     refAll(round);
+     refAll(@import("graph_cache.zig"));
++    refAll(@import("structure_mask.zig"));
+     refAll(round2d);
+     refAll(draft2d);
+     refAll(markov_tokens);
+diff --git a/zig/src/families/dsv41/lanes.zig b/zig/src/families/dsv41/lanes.zig
+index e2e341e8a64b444df5518703f99ac7ca5bb75bce..9f3a577fcfd854b27479e6595a453f8a2748d061 100644
+--- a/zig/src/families/dsv41/lanes.zig
++++ b/zig/src/families/dsv41/lanes.zig
+@@ -19,6 +19,7 @@ const model = @import("model.zig");
+ const round = @import("round.zig");
+ const draft = @import("draft.zig");
+ const sampling = @import("sampling.zig");
++const structure_mask = @import("structure_mask.zig");
+ const link = @import("link.zig");
+ const cuda = @import("cuda");
+ const spill_tier = @import("spill_tier.zig");
+@@ -61,7 +62,7 @@ pub var logits_sha = false;
+ pub const Kind = enum(u8) { fill_begin = 1, fill_chunk = 2, verify = 3, pass = 4, snap_save = 5, snap_restore = 6, snap_drop = 7, fill_images = 8, done = 9, rank_wire = 10 };
+ 
+ comptime {
+-    std.debug.assert(@intFromEnum(Kind.rank_wire) == @import("rank_wire.zig").lanes_kind);
++    std.debug.assert(@backingInt(Kind.rank_wire) == @import("rank_wire.zig").lanes_kind);
+ }
+ 
+ /// A frame being written.
+@@ -397,8 +398,27 @@ const Lane = struct {
+     held: [draft.max_block]u32 = undefined,
+     confs: [draft.max_block]f32 = undefined,
+     nheld: usize = 0,
++    so: ?SoState = null, // a structured reply's matcher (null: the stream's tokens are unconstrained)
+ };
+ 
++/// A structured reply's matcher and the mask's state: the grammar engages at the first token, or after the
++/// think block's close token; a short leading whitespace run (the template's "\n\n") may precede it; every
++/// emitted token is accepted into the matcher in order.
++const SoState = struct {
++    m: *anyopaque,
++    ops: *const lanes.StructureOps,
++    phase: Phase = .idle,
++    seen: usize = 0, // emitted tokens processed: accepted, or skipped before the grammar engaged
++    ws_used: u8 = 0, // leading whitespace tokens allowed so far (two at most)
++    after: i64 = -1, // the token the grammar starts after (-1: from the first token)
++    ws_ids: []const u32 = &.{},
++
++    const Phase = enum { idle, ws, engaged, done };
++};
++
++/// The mask words a vocabulary needs: 4096 holds 131072 ids (the served checkpoint's 129280 needs 4040).
++const so_max_words = 4096;
++
+ extern "c" fn exp(x: f64) f64;
+ 
+ /// A kept prompt state (the prompt cache's saved state, kept at a chunk end the prompt pass reached before its
+@@ -459,6 +479,7 @@ pub const Lanes = struct {
+     /// The pair's one rank_wire Leader (native.openPair: agreed with rank_identity's full fingerprint before anything
+     /// spill- or shard-related crosses), shared by the spill tier and the KV parts; owned here (null: neither is on).
+     rw: ?*rank_wire.Leader = null,
++    so_bits: [so_max_words]i32 = undefined, // a constrained row's mask (verify and the first draw, one stream at a time)
+ 
+     pub fn init(gpa: std.mem.Allocator, m: *Model) Lanes {
+         var ln: Lanes = .{ .gpa = gpa, .m = m, .peer = if (m.world > 1) m.peer() else null };
+@@ -480,6 +501,8 @@ pub const Lanes = struct {
+         if (self.peer != null) self.send(.done) catch {};
+         if (self.rw) |l| self.gpa.destroy(l); // (after the tier and the planner that borrowed it)
+         self.rw = null;
++        var it = self.streams.valueIterator();
++        while (it.next()) |l| if (l.so) |st| st.ops.free(st.m);
+         self.streams.deinit(self.gpa);
+         for (&self.seqs) |*q| q.deinit(self.gpa);
+         self.wire.deinit(self.gpa);
+@@ -749,6 +772,61 @@ pub const Lanes = struct {
+     /// How stale /health's parts' stats may be (kvPartsFn).
+     const kv_stats_ns: u64 = 250 * std.time.ns_per_ms;
+ 
++    /// The mask one constrained row is drawn under: advance the stream's matcher over every reply token it has
++    /// not seen, then `-inf` the row's disallowed ids (a done or terminated grammar allows them all: the reply
++    /// ends on its own). False: nothing to mask (the think block runs before the grammar engages).
++    fn soMask(self: *Lanes, st: *SoState, s: *lanes.Stream, row: []f32) !bool {
++        const em = s.emitted();
++        while (st.seen < em.len) : (st.seen += 1) {
++            const id = em[st.seen];
++            switch (st.phase) {
++                .idle => if (st.after >= 0 and id == @as(u32, @intCast(st.after))) {
++                    st.phase = .ws;
++                },
++                .ws => {
++                    if (std.mem.indexOfScalar(u32, st.ws_ids, id) != null) {
++                        st.ws_used += 1;
++                        if (st.ws_used >= 2) st.phase = .engaged;
++                    } else {
++                        st.phase = .engaged;
++                        if (!st.ops.accept(st.m, id)) st.phase = .done; // the grammar refused it: stop constraining
++                    }
++                },
++                .engaged => if (!st.ops.accept(st.m, id)) {
++                    st.phase = .done;
++                },
++                .done => {},
++            }
++        }
++        if (st.phase == .idle) return false;
++        const vocab = self.m.vocab;
++        const words = (vocab + 31) / 32;
++        if (words > so_max_words) return error.VocabTooLarge;
++        const bits = self.so_bits[0..words];
++        if (st.phase == .done) {
++            // the grammar is over (or refused a token): every id may follow, the reply ends on its own
++            structure_mask.fillAll(bits, vocab);
++        } else {
++            switch (st.ops.fill(st.m, bits)) {
++                0 => return false, // every id allowed: the row needs no mask
++                -1 => return error.StructureMaskFailed,
++                else => {},
++            }
++            if (st.ops.terminated(st.m)) {
++                structure_mask.fillAll(bits, vocab);
++                st.phase = .done;
++            } else if (st.phase == .ws) {
++                // the bounded leading whitespace run, besides what the grammar allows from here
++                for (st.ws_ids) |id| if (id < vocab) {
++                    const b: u5 = @intCast(id % 32);
++                    bits[id / 32] |= @as(i32, 1) << b;
++                };
++            }
++        }
++        structure_mask.maskRow(row, bits, vocab);
++        return true;
++    }
++
+     // -- the vtable ---------------------------------------------------------------------------------------------
+ 
+     /// The lowest free slot, the first extent that fits, the prompt in chunks of the served size (at multiples of it:
+@@ -773,6 +851,7 @@ pub const Lanes = struct {
+         if (kv == null and m.kvs != null) return error.KvShardNotStarted; // (startKv at open)
+         if (self.streams.fetchRemove(s)) |old| {
+             self.used[old.value.slot] = false;
++            if (old.value.so) |st| st.ops.free(st.m);
+             if (kv) |k| try k.release(old.value.id);
+         }
+         const slot = std.mem.indexOfScalar(bool, self.used[0..self.m.streams], false) orelse return error.NoFreeSlot;
+@@ -821,6 +900,16 @@ pub const Lanes = struct {
+             _ = self.streams.remove(s);
+             self.used[slot] = false;
+         }
++        // a structured reply: one matcher for this stream over the grammar the request compiled (the mask applies
++        // from its first token, or after the think block's close token)
++        if (s.structure) |spec| {
++            const ops = spec.ops orelse return error.NoStructureOps;
++            const grammar = spec.handle orelse return error.NoStructureGrammar;
++            const matcher = ops.create(ops.ctx, grammar) orelse return error.NoStructureMatcher;
++            errdefer ops.free(matcher);
++            const lane = self.streams.getPtr(s) orelse return error.UnknownStream;
++            lane.so = .{ .m = matcher, .ops = ops, .phase = if (spec.after < 0) .ws else .idle, .after = spec.after, .ws_ids = spec.ws_ids };
++        }
+         const seq = &self.seqs[slot];
+         try seq.resize(gpa, len);
+         for (seq.items, ids) |*q, id| q.* = @intCast(id);
+@@ -950,6 +1039,10 @@ pub const Lanes = struct {
+             std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(logits), &dg, .{});
+             std.debug.print("{{\"prompt_logits\": \"{s}\", \"sha256\": \"{s}\"}}\n", .{ s.id, std.fmt.bytesToHex(dg, .lower) });
+         }
++        // a constrained first token: the prompt's row through the mask before the draw
++        if (self.streams.getPtr(s)) |l| {
++            if (l.so) |*st| _ = try self.soMask(st, s, @constCast(logits));
++        }
+         const token = try draw(logits, len, s.sampling);
+         self.streams.getPtr(s).?.first = self.take(token);
+     }
+@@ -1000,8 +1093,13 @@ pub const Lanes = struct {
+                 greedy = false;
+             };
+         }
+-        const tokens: []const u32 = if (greedy) try m.roundArgmax(rows.ids.len) else &.{};
+-        const logits: []const f32 = if (greedy) &.{} else try m.roundLogits(rows.ids.len);
++        // a constrained window's rows are masked on the host before the draw, so its round reads the logits too
++        var host_rows = !greedy;
++        for (windows) |w| {
++            if (w.stream.structure != null) host_rows = true;
++        }
++        const tokens: []const u32 = if (host_rows) &.{} else try m.roundArgmax(rows.ids.len);
++        const logits: []const f32 = if (host_rows) try m.roundLogits(rows.ids.len) else &.{};
+         if (m.ringFailed()) return error.RingFailed; // (robustness: a graph's collect gave up on a dead peer's flags)
+         const t3 = m.now();
+         defer if (self.prof) |*p| {
+@@ -1017,7 +1115,14 @@ pub const Lanes = struct {
+         const V = m.vocab;
+         for (windows, out, 0..) |w, *o, k| {
+             const row0 = self.built.wins[k].row;
+-            for (0..w.rows()) |r| o.sampled[r] = if (greedy) tokens[row0 + r] else try draw(logits[(row0 + r) * V ..][0..V], w.positions[r], w.stream.sampling);
++            const constrained: ?*Lane = if (w.stream.structure == null) null else self.streams.getPtr(w.stream);
++            for (0..w.rows()) |r| {
++                const row = logits[(row0 + r) * V ..][0..V];
++                if (constrained) |l| {
++                    if (l.so) |*st| _ = try self.soMask(st, w.stream, @constCast(row));
++                }
++                o.sampled[r] = if (host_rows) try draw(row, w.positions[r], w.stream.sampling) else tokens[row0 + r];
++            }
+             const l = self.streams.getPtr(w.stream).?;
+             @memcpy(o.drafts[0..w.held], l.held[0..w.held]);
+             @memcpy(o.drafts[w.held..][0..w.tokens.len], w.tokens);
+@@ -1377,6 +1482,7 @@ pub const Lanes = struct {
+             return;
+         };
+         self.used[kv.value.slot] = false;
++        if (kv.value.so) |st| st.ops.free(st.m);
+         if (self.kv) |k| k.release(kv.value.id) catch |err| std.log.err("dsv41: the parts' planner kept a released stream: {s}", .{@errorName(err)});
+     }
+ };
+@@ -2028,8 +2134,8 @@ test "a restore's destination is held back from placement, never a victim and ne
+     loading.restored = true;
+     try std.testing.expect(ln.usable(&loading, 8 * c));
+     // with the tier off nothing spill-related runs: the frame kinds before it keep their values
+-    try std.testing.expectEqual(@as(u8, 9), @intFromEnum(Kind.done));
+-    try std.testing.expectEqual(@as(u8, 10), @intFromEnum(Kind.rank_wire));
++    try std.testing.expectEqual(@as(u8, 9), @backingInt(Kind.done));
++    try std.testing.expectEqual(@as(u8, 10), @backingInt(Kind.rank_wire));
+     try std.testing.expect(std.enums.fromInt(Kind, 11) == null); // (round 2's spill notes are rank_wire ops now)
+     try std.testing.expect(ln.spill == null);
+ }
+@@ -2533,7 +2639,7 @@ test "spill + shard: an owner-sharded reserve lands only on the follower planner
+     const hold: kv_lanes.WireOp = .{ .hold = .{ .id = 77, .part = 1, .base = 40 * c, .size = 8 * c, .gen = gen } };
+     try kf.shardOps(h, .{ .owner_epoch = 2, .index = 0, .last = true, .ops = &.{hold} });
+     // a spill side not yet agreed (no store): what passes the hold check reaches it and is refused there
+-    const shapes = [_]spill_tier_state.LayerShape{ .{ .ratio = 1, .kv = true, .idx = true } };
++    const shapes = [_]spill_tier_state.LayerShape{.{ .ratio = 1, .kv = true, .idx = true }};
+     const raw = try spill_tier_state.StateLayout.init(&shapes, .{ .block_tokens = c, .window = 8, .ring_extra = 4, .raw_rows = 4, .head_dim = 64, .index_head_dim = 64 }, .owner_sharded);
+     const layout = try raw.withParts(32 * c);
+     const sf = try MiniSpill.create(gpa, std.testing.io, 1, miniFx(1), null, .{ .dev = .{}, .layout = layout, .gens = try spill_tier_state.Generations.init(gpa, cfg.cap, c), .settings = .{ .dir = "/nonexistent", .gib = 1 }, .max_tokens = @intCast(32 * c), .staging = &.{}, .events = &.{} });
+diff --git a/zig/src/families/dsv41/structure_mask.zig b/zig/src/families/dsv41/structure_mask.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..976e4f87527f07f7486224647c58e5c8537520e0
+--- /dev/null
++++ b/zig/src/families/dsv41/structure_mask.zig
+@@ -0,0 +1,60 @@
++//! The grammar mask's arithmetic, and the row application the decode loop calls before `sampleDev`.
++//!
++//! The served sampler reads only a row's top_k + margin candidates from the device, so a mask has
++//! to be in the logits before that read. v1 applies it on the host: copy the row down, set `-inf`
++//! where the bit is 0, copy it back — constrained rows only, one row a round, against a 30-60 ms
++//! round. Ids past the mask's words are `-inf` too, so a vocabulary padded past the tokenizer's
++//! size cannot leak an unmasked token. A device kernel is the v2 fast path.
++const std = @import("std");
++
++/// `-inf` where the bit is 0, over `vocab` entries; ids past `bits` are masked as well. Pure:
++/// the unit test below drives it, and the device path calls it on the copied row.
++pub fn maskRow(row: []f32, bits: []const i32, vocab: usize) void {
++    const n = @min(row.len, vocab);
++    for (0..n) |i| {
++        const w = i / 32;
++        const b: u5 = @intCast(i % 32);
++        const allowed = w < bits.len and ((bits[w] >> b) & 1) == 1;
++        if (!allowed) row[i] = -std.math.inf(f32);
++    }
++    var i = n;
++    while (i < row.len) : (i += 1) row[i] = -std.math.inf(f32);
++}
++
++/// The mask a row of an all-ones grammar needs: every id allowed (the idle state before the
++/// grammar engages, and after it completes).
++pub fn fillAll(bits: []i32, vocab: usize) void {
++    for (bits) |*w| w.* = -1;
++    const rem = vocab % 32;
++    if (rem != 0 and bits.len > 0) {
++        const keep: u5 = @intCast(rem);
++        bits[bits.len - 1] = (@as(i32, 1) << keep) - 1;
++    }
++}
++
++test "maskRow masks disallowed entries and everything past the vocabulary" {
++    var row: [40]f32 = undefined;
++    for (&row) |*v| v.* = 1.0;
++    var bits: [1]i32 = .{0};
++    bits[0] = (1 << 0) | (1 << 5) | (1 << 9); // ids 0, 5, 9 allowed
++    maskRow(&row, &bits, 32);
++    try std.testing.expect(row[0] == 1.0);
++    try std.testing.expect(row[5] == 1.0);
++    try std.testing.expect(row[9] == 1.0);
++    try std.testing.expect(row[1] == -std.math.inf(f32));
++    try std.testing.expect(row[31] == -std.math.inf(f32));
++    // ids past the vocabulary are masked too, even though their bits were never written
++    try std.testing.expect(row[32] == -std.math.inf(f32));
++    try std.testing.expect(row[39] == -std.math.inf(f32));
++}
++
++test "fillAll allows every id of the vocabulary, including a partial last word" {
++    var bits: [2]i32 = .{ 0, 0 };
++    fillAll(&bits, 40); // 32 + 8
++    try std.testing.expect(bits[0] == -1);
++    try std.testing.expect(bits[1] == (1 << 8) - 1);
++    var row: [40]f32 = undefined;
++    for (&row) |*v| v.* = 2.0;
++    maskRow(&row, &bits, 40);
++    for (row) |v| try std.testing.expect(v == 2.0);
++}
+diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
+index 279bfac5c00a8edc9ec374ee79999ac6e1ffcece..5bcc1f04a8763f81e4e23985f146195f0f586428 100644
+--- a/zig/src/native/cuda.zig
++++ b/zig/src/native/cuda.zig
+@@ -443,7 +443,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+     };
+     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
+     const vision: ?api.Vision = if (@hasField(@TypeOf(loaded), "vision")) loaded.vision else null;
+-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(served), .startup = h.startup, .efforts = familyEfforts(F), .vision = vision, .call_gates = true }, .{ .ctx = loaded.ctx, .text = F.explain });
++    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(served), .startup = h.startup, .efforts = familyEfforts(F), .vision = vision, .call_gates = true, .structures = soEnabled() }, .{ .ctx = loaded.ctx, .text = F.explain });
+     opened = true;
+     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+ }
+@@ -595,3 +595,10 @@ test "a cancel during a long prompt stops it, and the next request's reply is un
+     }
+     try std.testing.expectEqual(@as(usize, 40), restored.tokens.items.len);
+ }
++
++/// `TF_DS_SO` (default 1): 0 leaves structured output off, so Info.structures stays false and the
++/// server keeps its old refusal (the kill switch).
++fn soEnabled() bool {
++    const v = getenv("TF_DS_SO") orelse return true;
++    return !(v.len == 1 and v[0] == '0');
++}
+diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
+index 86285acce84a5b4c9ad875d42d904ac7f9e6068f..aaa001cd26b4102df1918a85382874f27c476464 100644
+--- a/zig/src/server/root.zig
++++ b/zig/src/server/root.zig
+@@ -43,3 +43,7 @@ test {
+     _ = @import("decisions_test.zig");
+     _ = @import("prepare_gate.zig");
+ }
++
++test {
++    _ = @import("structure.zig");
++}
+diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
+index 62701b528e7f8cc997c60e43dad41d8a886feeab..cc2903ba419b9aad9ec2441d509eed68b6096304 100644
+--- a/zig/src/server/server.zig
++++ b/zig/src/server/server.zig
+@@ -19,6 +19,7 @@ const tool_specs = @import("tool_specs.zig");
+ const chunk_plan = @import("chunk_plan.zig");
+ const log = @import("log.zig");
+ const prepare_gate = @import("prepare_gate.zig");
++const structure = @import("structure.zig");
+ const Value = json.Value;
+ const Cx = errors.Cx;
+ const Allocator = std.mem.Allocator;
+@@ -88,6 +89,8 @@ pub const Server = struct {
+     /// Concurrent prompt preparations held under the memory floor (prepare_gate).
+     gate: prepare_gate.Gate = .{},
+     arena: std.heap.ArenaAllocator,
++    /// The grammar engine (Info.structures): null when off, unavailable, or TF_DS_SO=0.
++    so: ?*structure.So = null,
+ 
+     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
+     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
+@@ -121,11 +124,19 @@ pub const Server = struct {
+             srv.chunks = try chunk_plan.markers(srv, a, srv.info.prefill_step);
+             log.line("prompt chunks of up to {d},{d:0>3} tokens, cut at replies {d}+ tokens apart", .{ srv.info.prefill_step / 1000, srv.info.prefill_step % 1000, srv.chunks.min_chunk });
+         }
++        if (srv.info.structures and structure.enabled()) {
++            srv.so = structure.init(gpa, io, text, text.vocabSize()) catch |e| blk: {
++                log.line("structured output off: {s}", .{@errorName(e)});
++                break :blk null;
++            };
++            if (srv.so != null) log.line("structured output on: {d} tokens, cache {d} MiB", .{ text.vocabSize(), structure.cacheBytes() >> 20 });
++        }
+         return srv;
+     }
+ 
+     pub fn deinit(srv: *Server) void {
+         if (srv.keepalive) |k| k.stop(); // before the engine's queue goes away
++        if (srv.so) |so| so.deinit(srv.gpa);
+         srv.arena.deinit();
+         srv.store.deinit();
+         srv.gpa.destroy(srv);
+@@ -192,7 +203,20 @@ pub const Server = struct {
+         }
+         if (try grammar.spec(cx, f)) |s| {
+             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
+-            request.structure = .{ .kind = s.kind, .text = s.text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null };
++            // A tool call would bypass the grammar entirely: the mask covers the reply's content, while the
++            // call markup is parsed out of it. Refuse the combination rather than silently ignore the schema.
++            if (has_tools) return cx.refuse("structured output (response_format and the guided_* fields) cannot be combined with tools: send one or the other");
++            const so = srv.so orelse return cx.refuse("structured output is off on this server (TF_DS_SO=0, or the build has no grammar library)");
++            // compile now, before any header: a bad schema is a 400, never a half-sent reply
++            var errbuf: [512]u8 = std.mem.zeroes([512]u8);
++            const kinds: structure.Kind = @enumFromInt(@intFromEnum(s.kind));
++            const ptr = so.cache.getOrCompile(kinds, s.text, &errbuf, structure.timeoutMs()) catch |e| switch (e) {
++                error.Timeout => return cx.refuse("structured output: the grammar did not compile within TF_DS_SO_TIMEOUT_S"),
++                error.CompileFailed => return cx.fail(.request, "structured output: {s}", .{std.mem.sliceTo(&errbuf, 0)}),
++                error.OutOfMemory => return error.OutOfMemory,
++                else => return cx.refuse("structured output: the grammar could not be compiled"),
++            };
++            request.structure = .{ .kind = s.kind, .text = s.text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .handle = ptr, .ws_ids = so.ws_ids, .ops = &so.ops };
+         }
+     }
+ 
+diff --git a/zig/src/server/structure.zig b/zig/src/server/structure.zig
+new file mode 100644
+index 0000000000000000000000000000000000000000..32c1842adf08a24be9ded4e236b0e32b4f66f480
+--- /dev/null
++++ b/zig/src/server/structure.zig
+@@ -0,0 +1,188 @@
++//! Boot-time wiring of the structured-output grammar engine: the vocabulary (from the server's
++//! Text), the shim library, and the compile cache. `TF_DS_SO=0`, a missing library or a missing
++//! build option leaves the server without structured output (Info.structures stays false), never
++//! a crash.
++const std = @import("std");
++const engine_api = @import("engine_api");
++const structure = @import("structure");
++const model_text = @import("model_text.zig");
++const bo = @import("build_options");
++const log = @import("log.zig");
++
++/// The grammar kinds, re-exported so the server names one type for both modules.
++pub const Kind = structure.Kind;
++
++pub const Padded = struct { vocab: u32 };
++
++/// One initialized grammar engine: the shim (heap-owned: the cache holds a pointer to it), the
++/// tokenizer context it was built from, and the compile cache.
++pub const So = struct {
++    a: std.mem.Allocator,
++    api: *structure.Api,
++    ctx: ?*anyopaque,
++    cache: structure.Cache,
++    padded: u32,
++    /// Ids whose token is only whitespace: what the bounded leading-whitespace phase may emit.
++    ws_ids: []u32,
++    /// The matcher table a family drives: one matcher a stream, over the grammar the request compiled.
++    ops: engine_api.StructureOps,
++
++    pub fn deinit(self: *So, a: std.mem.Allocator) void {
++        a.free(self.ws_ids);
++        self.cache.deinit();
++        self.api.ctx_free(self.ctx);
++        self.api.close();
++        a.destroy(self.api);
++        a.destroy(self);
++    }
++
++    /// One stream's matcher: the shim's, behind the allocator's own record (the table's calls get only the
++    /// matcher, and the record keeps the shim and the allocator that frees it).
++    const Matcher = struct {
++        a: std.mem.Allocator,
++        api: *structure.Api,
++        m: *anyopaque,
++    };
++
++    fn opCreate(p: *anyopaque, grammar: ?*anyopaque) ?*anyopaque {
++        const self: *So = @ptrCast(@alignCast(p));
++        var err: [512]u8 = std.mem.zeroes([512]u8);
++        const raw = self.api.matcher_create(self.ctx, grammar, &err, @intCast(err.len)) orelse {
++            log.line("structured output: no matcher for this reply: {s}", .{std.mem.sliceTo(&err, 0)});
++            return null;
++        };
++        const mt = self.a.create(Matcher) catch {
++            self.api.matcher_free(raw);
++            return null;
++        };
++        mt.* = .{ .a = self.a, .api = self.api, .m = raw };
++        return mt;
++    }
++
++    fn opFill(p: *anyopaque, bits: []i32) i32 {
++        const mt: *Matcher = @ptrCast(@alignCast(p));
++        return mt.api.fill(mt.m, bits.ptr);
++    }
++
++    fn opAccept(p: *anyopaque, id: u32) bool {
++        const mt: *Matcher = @ptrCast(@alignCast(p));
++        return mt.api.accept(mt.m, @intCast(id)) == 1;
++    }
++
++    fn opTerminated(p: *anyopaque) bool {
++        const mt: *Matcher = @ptrCast(@alignCast(p));
++        return mt.api.terminated(mt.m) == 1;
++    }
++
++    fn opFree(p: *anyopaque) void {
++        const mt: *Matcher = @ptrCast(@alignCast(p));
++        mt.api.matcher_free(mt.m);
++        mt.a.destroy(mt);
++    }
++};
++
++/// The library path baked at build time (`-Dxgrammar`), or "" when the build has no shim.
++pub fn soPath() []const u8 {
++    // the image installs the library at a fixed path; a developer build points at its cache
++    if (bo.so_lib_runtime.len > 0) return bo.so_lib_runtime;
++    return bo.so_lib;
++}
++
++/// `TF_DS_SO` (default 1): 0 leaves the capability off.
++pub fn enabled() bool {
++    const v = getenv("TF_DS_SO") orelse return true;
++    return !(v.len == 1 and v[0] == '0');
++}
++
++/// `TF_DS_SO_CACHE_BYTES` (default 256 MiB): the compile cache's byte bound, 0 = compile per request.
++pub fn cacheBytes() usize {
++    const v = getenv("TF_DS_SO_CACHE_BYTES") orelse return 256 << 20;
++    return std.fmt.parseInt(usize, v, 10) catch 256 << 20;
++}
++
++/// `TF_DS_SO_TIMEOUT_S` (default 20): a compile past it is refused at admission.
++pub fn timeoutMs() u64 {
++    const v = getenv("TF_DS_SO_TIMEOUT_S") orelse return 20_000;
++    const s = std.fmt.parseInt(u64, v, 10) catch 20;
++    return s * 1000;
++}
++
++fn getenv(name: [:0]const u8) ?[]const u8 {
++    return std.mem.span(std.c.getenv(name) orelse return null);
++}
++
++/// Build the vocabulary from the server's Text: each id's exact decoded bytes (RAW), specials
++/// blocked with empty bytes so the mask can never produce them, the EOS ids as stops, and the
++/// model's padded width as the mask's vocabulary size.
++pub fn init(a: std.mem.Allocator, io: std.Io, text: model_text.Text, padded: u32) !*So {
++    if (soPath().len == 0) return error.NoShim;
++
++    const api = try a.create(structure.Api);
++    errdefer a.destroy(api);
++    api.* = try structure.Api.load(soPath());
++    errdefer api.close();
++
++    const n = text.vocabSize();
++    const bytes = try a.alloc(?[*]const u8, n);
++    defer a.free(bytes);
++    const lens = try a.alloc(i32, n);
++    defer a.free(lens);
++    var owned: std.ArrayListUnmanaged([]u8) = .empty;
++    defer {
++        for (owned.items) |b| a.free(b);
++        owned.deinit(a);
++    }
++    var ws: std.ArrayListUnmanaged(u32) = .empty;
++    errdefer ws.deinit(a);
++
++    for (0..n) |i| {
++        const id: u32 = @intCast(i);
++        const is_special = if (text.vtable.special) |sp| sp(text.ctx, id) else false;
++        if (is_special) {
++            bytes[i] = null;
++            lens[i] = 0;
++            continue;
++        }
++        const b = text.decode(a, &.{id}) catch {
++            bytes[i] = null;
++            lens[i] = 0;
++            continue;
++        };
++        try owned.append(a, b);
++        bytes[i] = b.ptr;
++        lens[i] = @intCast(b.len);
++        if (allWhitespace(b)) try ws.append(a, id);
++    }
++
++    const eos = text.eosIds();
++    const stops = try a.alloc(i32, eos.len);
++    defer a.free(stops);
++    for (eos, 0..) |v, i| stops[i] = @intCast(v);
++    var err: [512]u8 = std.mem.zeroes([512]u8);
++    const ctx = api.init(@ptrCast(bytes.ptr), lens.ptr, @intCast(n), @intCast(padded), if (stops.len > 0) stops.ptr else null, @intCast(stops.len), &err, @intCast(err.len)) orelse {
++        log.line("structured output: the shim rejected the vocabulary: {s}", .{std.mem.sliceTo(&err, 0)});
++        return error.VocabRefused;
++    };
++
++    const so = try a.create(So);
++    errdefer a.destroy(so);
++    const ws_ids = try ws.toOwnedSlice(a);
++    errdefer a.free(ws_ids);
++    so.* = .{
++        .a = a,
++        .api = api,
++        .ctx = ctx,
++        .cache = structure.Cache.init(a, io, api, ctx, cacheBytes()),
++        .padded = padded,
++        .ws_ids = ws_ids,
++        .ops = .{ .ctx = so, .create = So.opCreate, .fill = So.opFill, .accept = So.opAccept, .terminated = So.opTerminated, .free = So.opFree },
++    };
++    return so;
++}
++
++/// A token's bytes are whitespace only (and not empty): what the leading-whitespace phase may emit.
++fn allWhitespace(b: []const u8) bool {
++    if (b.len == 0) return false;
++    for (b) |c| if (c != ' ' and c != '\n' and c != '\r' and c != '\t') return false;
++    return true;
++}

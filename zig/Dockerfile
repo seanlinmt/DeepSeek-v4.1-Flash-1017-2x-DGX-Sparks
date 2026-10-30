@@ -36,6 +36,15 @@ RUN ok=0; \
     mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 && rm /tmp/zig.tar.xz && \
     /opt/zig/zig version
 ARG SM=121
+ARG XGRAMMAR_REF
+# The structured-output grammar engine (xgrammar at XGRAMMAR_REF), built with the image's g++: the
+# same toolchain the shim is built with, so one libstdc++ sits on both sides of that boundary.
+RUN git init -q /xgrammar && cd /xgrammar && git remote add origin https://github.com/mlc-ai/xgrammar && \
+    git fetch -q --depth 1 origin "${XGRAMMAR_REF}" && git checkout -q --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${XGRAMMAR_REF}" && \
+    git submodule update --init --recursive -q && \
+    cmake -B build -DXGRAMMAR_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/xg && \
+    cmake --build build -j"$(nproc)" && cmake --install build && rm -rf /xgrammar
 
 # the serving engine
 ARG TF_REPO
@@ -46,8 +55,17 @@ RUN git init -q /tensorfold && cd /tensorfold && git remote add origin "${TF_REP
 COPY zig/patches /opt/tf-patches
 RUN cd /tensorfold && \
     for p in /opt/tf-patches/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply --check "$p" && git apply "$p" || exit 1; done
+# The structured-output shim: g++ against xgrammar, with libstdc++ linked dynamically. A static
+# runtime inside the shared object leaves xgrammar's fatal-error formatting writing through a
+# stream it never initialised (a segfault, not an exception). The engine loads it at run time.
+RUN mkdir -p /opt/tensorfold/lib && \
+    g++ -std=c++17 -O2 -fPIC -shared -Wl,-z,defs -Wl,-soname,libtfso.so \
+      -I/opt/xg/include -o /opt/tensorfold/lib/libtfso.so \
+      /tensorfold/zig/src/core/structure/tfso.cc /opt/xg/lib/libxgrammar.a && \
+    nm -D --defined-only /opt/tensorfold/lib/libtfso.so | grep -q tfso_init
+
 RUN cd /tensorfold && /opt/zig/zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=${SM} -Doptimize=ReleaseFast \
-      --prefix /opt/tensorfold -j"$(nproc)" install native && \
+      --prefix /opt/tensorfold -j"$(nproc)" install native -Dso-runtime=/opt/tensorfold/lib/libtfso.so && \
     test -x /opt/tensorfold/native/bin/tensorfold-native && test -x /opt/tensorfold/bin/tf-dsv41-lanes && \
     mkdir -p /opt/tensorfold/share/doc/tensorfold && \
     for f in LICENSE NOTICE ATTRIBUTION.md THIRD_PARTY_NOTICES.md LICENSES; do \
