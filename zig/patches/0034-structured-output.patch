@@ -1,4 +1,4 @@
-# port-patches.sh: structured-output @ a0c5d821e009 over so-base @ 6e55468809bb (squash 6e55468809bb..a0c5d821e009)
+# port-patches.sh: structured-output @ c436041cac50 over so-base @ 6e55468809bb (squash 6e55468809bb..c436041cac50)
 # structured output: xgrammar-constrained decoding
 # Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
 diff --git a/build.zig b/build.zig
@@ -231,7 +231,7 @@ literal 0
 HcmV?d00001
 
 diff --git a/zig/build/cuda.zig b/zig/build/cuda.zig
-index 57f775050b8449d2c7aa09099abe5a9fae62b02b..ff6fc89848bd0b90bf103271fdd5bfb248830c27 100644
+index 57f775050b8449d2c7aa09099abe5a9fae62b02b..0d58616c493795f921276ff65b74ebc756b9f052 100644
 --- a/zig/build/cuda.zig
 +++ b/zig/build/cuda.zig
 @@ -84,7 +84,7 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
@@ -252,7 +252,7 @@ index 57f775050b8449d2c7aa09099abe5a9fae62b02b..ff6fc89848bd0b90bf103271fdd5bfb2
  }
  
  /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
-@@ -193,7 +193,7 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
+@@ -193,18 +193,22 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
  }
  
  /// `zig build native`: tensorfold-native with the CUDA engines into zig-out/native/bin, as the Metal build makes it.
@@ -261,8 +261,15 @@ index 57f775050b8449d2c7aa09099abe5a9fae62b02b..ff6fc89848bd0b90bf103271fdd5bfb2
      const m = engines(b, target, optimize, cuda, lanes, nemotron, core);
      // the HTTP side keeps its safety checks; the engine below it runs at `optimize` (the tokenizer is the family's)
      const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
-@@ -205,6 +205,8 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
-         .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = m.engines }} }) } },
++    // the structured-output compile cache and shim loader, as its own module (the server imports it by name)
++    const structure_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/structure.zig"), .target = target, .optimize = optimize, .link_libc = true });
+     const exe = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
+         .root_source_file = b.path("zig/src/server/main.zig"),
+         .target = target,
+         .optimize = .ReleaseSafe,
+         .link_libc = true,
+-        .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = m.engines }} }) } },
++        .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "structure", .module = structure_mod }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = m.engines }} }) } },
      }) });
      exe.root_module.addOptions("build_options", build_options);
 +    if (xgrammar.len > 0) build_options.addOptionPath("so_lib", tfsoShared(b, target, xgrammar)) else build_options.addOption([]const u8, "so_lib", "");
@@ -270,7 +277,7 @@ index 57f775050b8449d2c7aa09099abe5a9fae62b02b..ff6fc89848bd0b90bf103271fdd5bfb2
      if (!install_native) {
          exe.root_module.strip = true;
          return exe;
-@@ -216,8 +218,17 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
+@@ -216,8 +220,17 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
  
  /// Host unit tests of the CUDA runtime, the backend-neutral core, the lane core, the engine API with its lane host and the
  /// CUDA family (no GPU), on any host.
@@ -289,7 +296,7 @@ index 57f775050b8449d2c7aa09099abe5a9fae62b02b..ff6fc89848bd0b90bf103271fdd5bfb2
      const cuda = runtime(b, host, .debug, &.{});
      const mods = family(b, host, .debug, cuda, draft_ids);
      const eng = engines(b, host, .debug, cuda, mods.lanes, mods.nemotron, mods.core);
-@@ -268,7 +279,7 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
+@@ -268,7 +281,7 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
      };
      const cuda = runtime(b, target, .fast, if (prebuilt != null) &images else &.{});
      const mods = family(b, target, .fast, cuda, draft_ids);
@@ -298,7 +305,7 @@ index 57f775050b8449d2c7aa09099abe5a9fae62b02b..ff6fc89848bd0b90bf103271fdd5bfb2
  }
  
  /// Validate the complete named input set, including images unused by today's server.
-@@ -277,3 +288,29 @@ pub fn checkDistFatbins(b: *std.Build, dir: []const u8) *std.Build.Step {
+@@ -277,3 +290,29 @@ pub fn checkDistFatbins(b: *std.Build, dir: []const u8) *std.Build.Step {
      for (kernels) |k| if (!k.opt_in) check.addFileArg(b.graph.cwdRelativePath(b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{k.name}) })));
      return &check.step;
  }
@@ -1556,7 +1563,7 @@ index 0000000000000000000000000000000000000000..976e4f87527f07f7486224647c58e5c8
 +    for (row) |v| try std.testing.expect(v == 2.0);
 +}
 diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
-index 279bfac5c00a8edc9ec374ee79999ac6e1ffcece..91468f893f86f7386869a49c66f4503730d0ac13 100644
+index 279bfac5c00a8edc9ec374ee79999ac6e1ffcece..5bcc1f04a8763f81e4e23985f146195f0f586428 100644
 --- a/zig/src/native/cuda.zig
 +++ b/zig/src/native/cuda.zig
 @@ -443,7 +443,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
@@ -1576,7 +1583,7 @@ index 279bfac5c00a8edc9ec374ee79999ac6e1ffcece..91468f893f86f7386869a49c66f45037
 +/// `TF_DS_SO` (default 1): 0 leaves structured output off, so Info.structures stays false and the
 +/// server keeps its old refusal (the kill switch).
 +fn soEnabled() bool {
-+    const v = std.posix.getenv("TF_DS_SO") orelse return true;
++    const v = getenv("TF_DS_SO") orelse return true;
 +    return !(v.len == 1 and v[0] == '0');
 +}
 diff --git a/zig/src/server/root.zig b/zig/src/server/root.zig
@@ -1653,31 +1660,38 @@ index 62701b528e7f8cc997c60e43dad41d8a886feeab..32b31b280b6e2a06ed0ce09b818e2c38
  
 diff --git a/zig/src/server/structure.zig b/zig/src/server/structure.zig
 new file mode 100644
-index 0000000000000000000000000000000000000000..5334a65715f399cb1e71bb7f39ecc9f3b31039e5
+index 0000000000000000000000000000000000000000..32c1842adf08a24be9ded4e236b0e32b4f66f480
 --- /dev/null
 +++ b/zig/src/server/structure.zig
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,188 @@
 +//! Boot-time wiring of the structured-output grammar engine: the vocabulary (from the server's
 +//! Text), the shim library, and the compile cache. `TF_DS_SO=0`, a missing library or a missing
 +//! build option leaves the server without structured output (Info.structures stays false), never
 +//! a crash.
 +const std = @import("std");
-+const api_mod = @import("../core/structure/api.zig");
-+const structure = @import("../core/structure.zig");
++const engine_api = @import("engine_api");
++const structure = @import("structure");
 +const model_text = @import("model_text.zig");
 +const bo = @import("build_options");
++const log = @import("log.zig");
++
++/// The grammar kinds, re-exported so the server names one type for both modules.
++pub const Kind = structure.Kind;
 +
 +pub const Padded = struct { vocab: u32 };
 +
 +/// One initialized grammar engine: the shim (heap-owned: the cache holds a pointer to it), the
 +/// tokenizer context it was built from, and the compile cache.
 +pub const So = struct {
-+    api: *api_mod.Api,
++    a: std.mem.Allocator,
++    api: *structure.Api,
 +    ctx: ?*anyopaque,
 +    cache: structure.Cache,
 +    padded: u32,
 +    /// Ids whose token is only whitespace: what the bounded leading-whitespace phase may emit.
 +    ws_ids: []u32,
++    /// The matcher table a family drives: one matcher a stream, over the grammar the request compiled.
++    ops: engine_api.StructureOps,
 +
 +    pub fn deinit(self: *So, a: std.mem.Allocator) void {
 +        a.free(self.ws_ids);
@@ -1686,6 +1700,50 @@ index 0000000000000000000000000000000000000000..5334a65715f399cb1e71bb7f39ecc9f3
 +        self.api.close();
 +        a.destroy(self.api);
 +        a.destroy(self);
++    }
++
++    /// One stream's matcher: the shim's, behind the allocator's own record (the table's calls get only the
++    /// matcher, and the record keeps the shim and the allocator that frees it).
++    const Matcher = struct {
++        a: std.mem.Allocator,
++        api: *structure.Api,
++        m: *anyopaque,
++    };
++
++    fn opCreate(p: *anyopaque, grammar: ?*anyopaque) ?*anyopaque {
++        const self: *So = @ptrCast(@alignCast(p));
++        var err: [512]u8 = std.mem.zeroes([512]u8);
++        const raw = self.api.matcher_create(self.ctx, grammar, &err, @intCast(err.len)) orelse {
++            log.line("structured output: no matcher for this reply: {s}", .{std.mem.sliceTo(&err, 0)});
++            return null;
++        };
++        const mt = self.a.create(Matcher) catch {
++            self.api.matcher_free(raw);
++            return null;
++        };
++        mt.* = .{ .a = self.a, .api = self.api, .m = raw };
++        return mt;
++    }
++
++    fn opFill(p: *anyopaque, bits: []i32) i32 {
++        const mt: *Matcher = @ptrCast(@alignCast(p));
++        return mt.api.fill(mt.m, bits.ptr);
++    }
++
++    fn opAccept(p: *anyopaque, id: u32) bool {
++        const mt: *Matcher = @ptrCast(@alignCast(p));
++        return mt.api.accept(mt.m, @intCast(id)) == 1;
++    }
++
++    fn opTerminated(p: *anyopaque) bool {
++        const mt: *Matcher = @ptrCast(@alignCast(p));
++        return mt.api.terminated(mt.m) == 1;
++    }
++
++    fn opFree(p: *anyopaque) void {
++        const mt: *Matcher = @ptrCast(@alignCast(p));
++        mt.api.matcher_free(mt.m);
++        mt.a.destroy(mt);
 +    }
 +};
 +
@@ -1698,28 +1756,26 @@ index 0000000000000000000000000000000000000000..5334a65715f399cb1e71bb7f39ecc9f3
 +
 +/// `TF_DS_SO` (default 1): 0 leaves the capability off.
 +pub fn enabled() bool {
-+    const v = posix.getenv("TF_DS_SO") orelse return true;
++    const v = getenv("TF_DS_SO") orelse return true;
 +    return !(v.len == 1 and v[0] == '0');
 +}
 +
 +/// `TF_DS_SO_CACHE_BYTES` (default 256 MiB): the compile cache's byte bound, 0 = compile per request.
 +pub fn cacheBytes() usize {
-+    const v = posix.getenv("TF_DS_SO_CACHE_BYTES") orelse return 256 << 20;
++    const v = getenv("TF_DS_SO_CACHE_BYTES") orelse return 256 << 20;
 +    return std.fmt.parseInt(usize, v, 10) catch 256 << 20;
 +}
 +
 +/// `TF_DS_SO_TIMEOUT_S` (default 20): a compile past it is refused at admission.
 +pub fn timeoutMs() u64 {
-+    const v = posix.getenv("TF_DS_SO_TIMEOUT_S") orelse return 20_000;
++    const v = getenv("TF_DS_SO_TIMEOUT_S") orelse return 20_000;
 +    const s = std.fmt.parseInt(u64, v, 10) catch 20;
 +    return s * 1000;
 +}
 +
-+const posix = struct {
-+    fn getenv(name: []const u8) ?[]const u8 {
-+        return std.posix.getenv(name);
-+    }
-+};
++fn getenv(name: [:0]const u8) ?[]const u8 {
++    return std.mem.span(std.c.getenv(name) orelse return null);
++}
 +
 +/// Build the vocabulary from the server's Text: each id's exact decoded bytes (RAW), specials
 +/// blocked with empty bytes so the mask can never produce them, the EOS ids as stops, and the
@@ -1727,12 +1783,12 @@ index 0000000000000000000000000000000000000000..5334a65715f399cb1e71bb7f39ecc9f3
 +pub fn init(a: std.mem.Allocator, io: std.Io, text: model_text.Text, padded: u32) !*So {
 +    if (soPath().len == 0) return error.NoShim;
 +
-+    const api = try a.create(api_mod.Api);
++    const api = try a.create(structure.Api);
 +    errdefer a.destroy(api);
-+    api.* = try api_mod.Api.load(soPath());
++    api.* = try structure.Api.load(soPath());
 +    errdefer api.close();
 +
-+    const n = text.vocab_size();
++    const n = text.vocabSize();
 +    const bytes = try a.alloc(?[*]const u8, n);
 +    defer a.free(bytes);
 +    const lens = try a.alloc(i32, n);
@@ -1764,20 +1820,28 @@ index 0000000000000000000000000000000000000000..5334a65715f399cb1e71bb7f39ecc9f3
 +        if (allWhitespace(b)) try ws.append(a, id);
 +    }
 +
-+    const stops = text.eos_ids();
++    const eos = text.eosIds();
++    const stops = try a.alloc(i32, eos.len);
++    defer a.free(stops);
++    for (eos, 0..) |v, i| stops[i] = @intCast(v);
 +    var err: [512]u8 = std.mem.zeroes([512]u8);
-+    const ctx = api.init(@ptrCast(bytes.ptr), lens.ptr, @intCast(n), @intCast(padded), stops.ptr, @intCast(stops.len), &err, @intCast(err.len)) orelse {
-+        std.log.warn("structured output: the shim rejected the vocabulary: {s}", .{std.mem.sliceTo(&err, 0)});
++    const ctx = api.init(@ptrCast(bytes.ptr), lens.ptr, @intCast(n), @intCast(padded), if (stops.len > 0) stops.ptr else null, @intCast(stops.len), &err, @intCast(err.len)) orelse {
++        log.line("structured output: the shim rejected the vocabulary: {s}", .{std.mem.sliceTo(&err, 0)});
 +        return error.VocabRefused;
 +    };
 +
 +    const so = try a.create(So);
++    errdefer a.destroy(so);
++    const ws_ids = try ws.toOwnedSlice(a);
++    errdefer a.free(ws_ids);
 +    so.* = .{
++        .a = a,
 +        .api = api,
 +        .ctx = ctx,
 +        .cache = structure.Cache.init(a, io, api, ctx, cacheBytes()),
 +        .padded = padded,
-+        .ws_ids = try ws.toOwnedSlice(a),
++        .ws_ids = ws_ids,
++        .ops = .{ .ctx = so, .create = So.opCreate, .fill = So.opFill, .accept = So.opAccept, .terminated = So.opTerminated, .free = So.opFree },
 +    };
 +    return so;
 +}
