@@ -14,3 +14,6 @@ Restore on a fresh repository:
 
 The public pin `629c524` is the bundle's only prerequisite, so nothing else has to exist first.
 Verified: a fresh repo with only that fetch restores the branch at its tip.
+
+The engine branch is also pushed to the fork **seanlinmt/TensorFold** (branch `structured-output`,
+tag `so-base`), which is the canonical remote; the bundle here is a network-free backup.
