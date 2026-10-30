@@ -65,3 +65,9 @@ Then: metrics + `TF_DS_SO_FAULT`, `zig/Dockerfile` + `scripts/config.sh`/`prepar
 - Zig 0.17: `std.Io.Mutex`/`std.Io.sleep` (no `std.Thread.Mutex`, no `milliTimestamp`), no `dupeZ`, and the
   `**` array-repeat literal fails to parse — use explicit arrays.
 - The engine is built only by `scripts/prepare.sh`; host tests only by `zig build test`.
+
+## Session log (append-only)
+
+- 2026-10-31: engine commits 6b3a0c3 (shim+build), b1829fa (cache), 9a567ea (vocab export), 2f867ea (admission), db0ec1e (mask arithmetic), 8a63267 (grammar carried through the lane stream). Host tests 337/339 - the 2 failures are the pre-existing spill cases. Feature stays OFF: Info.structures is false.
+- Next (family enforcement): the live[] window state near layer_main.zig:1300 holds slot/row/n/len/smp/req; add the matcher handle + phase; advance at sampleDev ~1185 (first token) and ~1316 (round rows); cuMemcpyDtoH -> structure_mask.maskRow -> cuMemcpyHtoD before the sample.
+- Then: native/cuda.zig .structures = soEnabled(); drafting exclusion in the family admission; TP mask delivery only in constrained rounds; metrics + TF_DS_SO_FAULT; zig/Dockerfile + scripts/config.sh/prepare.sh/image_hash (XGRAMMAR_REF pinned like TF_REF); TF_DS_SO=0 checkpoint with tools/exact.py; tools/structure_probe.py; live gates; scripts/port-patches.sh --engine ~/repos/tensorfold-dsv41-dev --branch structured-output --base so-base --mode squash --name structured-output.
