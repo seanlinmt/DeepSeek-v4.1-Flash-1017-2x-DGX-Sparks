@@ -191,7 +191,7 @@ def main():
     report("long-string field completes", err is None and fr == "stop", f"finish={fr} {c[:60]}")
 
     # 5 regex
-    r = post({"model": MODEL, "temperature": 0, "max_tokens": 64,
+    r = post({"model": MODEL, "temperature": 0, "max_tokens": 256,
               "messages": [{"role": "user", "content": "Give one code like AB-123."}],
               "guided_regex": "[A-Z]{2}-[0-9]{3}"})
     c = content_of(r).strip()
