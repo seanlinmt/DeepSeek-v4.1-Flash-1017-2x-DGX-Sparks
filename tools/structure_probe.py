@@ -219,18 +219,16 @@ def main():
                            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]})
     report("schema + required tool_choice refused", e is not None and e[0] == 400, str(e)[:80] if e else "served")
 
-    # 9 schema + tools (auto): constrained content, no calls
-    r = ask("What is the weather in Warsaw? Answer as JSON.", FLAT,
-            tools=[{"type": "function", "function": {"name": "get_weather",
-                                                     "parameters": {"type": "object",
-                                                                    "properties": {"city": {"type": "string"}}}}}],
-            tool_choice="auto")
-    m = r["choices"][0]["message"]
-    try:
-        err = validate(json.loads(m.get("content") or ""), FLAT)
-    except Exception as e:
-        err = f"not JSON: {e}"
-    report("schema + tools auto: content, no calls", err is None and not m.get("tool_calls"), (m.get("content") or "")[:60])
+    # 9 schema + tools: refused (a tool call would bypass the grammar)
+    e = post_expect_error({"model": MODEL, "temperature": 0, "max_tokens": 64,
+                           "messages": [{"role": "user", "content": "What is the weather in Warsaw?"}],
+                           "response_format": {"type": "json_schema",
+                                               "json_schema": {"name": "r", "schema": FLAT}},
+                           "tool_choice": "auto",
+                           "tools": [{"type": "function", "function": {"name": "get_weather",
+                                                                      "parameters": {"type": "object",
+                                                                                     "properties": {"city": {"type": "string"}}}}}]})
+    report("schema + tools refused", e is not None and e[0] == 400, str(e)[:80] if e else "served")
 
     # 10 unsatisfiable schema -> length, not a hang
     UNSAT = {"type": "object", "required": ["a", "b", "c"],
