@@ -73,3 +73,10 @@ Then: metrics + `TF_DS_SO_FAULT`, `zig/Dockerfile` + `scripts/config.sh`/`prepar
 - Then: native/cuda.zig .structures = soEnabled(); drafting exclusion in the family admission; TP mask delivery only in constrained rounds; metrics + TF_DS_SO_FAULT; zig/Dockerfile + scripts/config.sh/prepare.sh/image_hash (XGRAMMAR_REF pinned like TF_REF); TF_DS_SO=0 checkpoint with tools/exact.py; tools/structure_probe.py; live gates; scripts/port-patches.sh --engine ~/repos/tensorfold-dsv41-dev --branch structured-output --base so-base --mode squash --name structured-output.
 
 - 2026-10-31 (fixer): enforcement lands in dsv41/lanes.zig, NOT layer_main.zig — layer_main is the recordings gate (runDrafted over fixtures, DStream from a recording), so enforcing there would be dead code. soMask at lanes.zig:778, applied at :1044 (firstFn) and :1122 (verifyFn). StructureOps lives in core/lanes/stream.zig and is aliased from engine_api (Zig rejects importing core/structure/api.zig from the lanes module). The served path already copies logits to the host, so the mask is applied there and no extra DtoH/HtoD is needed. Whitespace cap = 2 tokens. Commits 6fe48ef, c980405; tests 337/339, only the two pre-existing spill failures. Info.structures still false.
+
+## Merged
+
+Patch 0034 is on `main` (merge `dc452e3`, image `tensorfold-dsv41:exl3-tp2-93c750801527`, the image the pair runs).
+Rollback is no longer "check out main": revert the merge (`git revert -m 1 dc452e3`) or start the previous
+tag with `IMAGE=tensorfold-dsv41:exl3-tp2-8e32557ada53 ./start.sh restart` (still cached).
+The feature stays switchable without a rebuild: `TF_DS_SO=0`.
