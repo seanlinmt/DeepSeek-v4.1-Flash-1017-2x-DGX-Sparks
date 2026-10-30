@@ -90,7 +90,7 @@ if [[ $REBUILD -eq 1 || "$built" != "$hash" ]]; then
   mkdir -p "$ctx/zig"; cp -r zig/patches "$ctx/zig/patches"; cp -r zig/patches-inputs "$ctx/zig/patches-inputs"; cp zig/Dockerfile "$ctx/Dockerfile"
   nocache=(); [[ $REBUILD -eq 1 ]] && nocache=(--no-cache)
   docker build "${nocache[@]}" -t "$IMAGE" -f "$ctx/Dockerfile" --build-arg BASE_IMAGE="$BASE_IMAGE" \
-    --build-arg TF_REPO="$TF_REPO" --build-arg TF_REF="$TF_REF" --build-arg INPUTS_REF="$INPUTS_REF" \
+    --build-arg TF_REPO="$TF_REPO" --build-arg TF_REF="$TF_REF" --build-arg INPUTS_REF="$INPUTS_REF" --build-arg XGRAMMAR_REF="$XGRAMMAR_REF" \
     --build-arg ZIG_VERSION="$ZIG_VERSION" --build-arg ZIG_SHA256="$ZIG_SHA256" --build-arg ZIG_MIRRORS="$ZIG_MIRRORS" \
     --build-arg PATCHES_HASH="$hash" "$ctx"
   rm -rf -- "$ctx"; trap - EXIT

@@ -77,6 +77,9 @@ declare -A ENGRAM_SHARD_SIZE=([model-00047-of-00048.safetensors]=101535150936 [m
 # native Zig engine, two nodes), at the head of that branch; it serves both ranks.
 TF_REPO="${TF_REPO:-https://github.com/bertholomus/TensorFold.git}"
 TF_REF="${TF_REF:-629c524a0ea57512a5342abb498d1b7c25353343}"   # the branch tip of 2026-10-19 (was 3ff3b2ac; docs/zig-engine.md, "The pin")
+# The structured-output grammar engine: xgrammar v0.2.2 (its commit), built into the image and loaded
+# by the engine at run time as libtfso.so (a g++ shared library; nothing links it).
+XGRAMMAR_REF="${XGRAMMAR_REF:-4d145cc13d878c751ebeed36af1c013074be76bc}"
 # The inputs' tools: the same fork's branch deepseek-v41-zig-tp4, at the commit of the four-node recipe v0.1.1. It adds
 # what the two-node branch lacks: tf-dsv41-rank-cache (a rank's weight file from the checkpoint alone, no GPU, no
 # Python) and the standalone token-map and RoPE-table scripts. Only those are taken; it does not serve here.
@@ -98,7 +101,7 @@ image_hash() {
     cat zig/patches/*.patch 2>/dev/null
     cat zig/patches-inputs/*.patch 2>/dev/null
     cat zig/Dockerfile
-    echo "$TF_REPO $TF_REF $INPUTS_REF zig-$ZIG_VERSION $ZIG_SHA256 $BASE_IMAGE"
+    echo "$TF_REPO $TF_REF $INPUTS_REF xgrammar-$XGRAMMAR_REF zig-$ZIG_VERSION $ZIG_SHA256 $BASE_IMAGE"
   ) | sha256sum | cut -c1-12
 }
 TAG_BASE="exl3-tp2"             # the image tag's prefix: <TAG_BASE>-<image hash>
