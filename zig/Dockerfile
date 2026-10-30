@@ -55,10 +55,11 @@ RUN git init -q /tensorfold && cd /tensorfold && git remote add origin "${TF_REP
 COPY zig/patches /opt/tf-patches
 RUN cd /tensorfold && \
     for p in /opt/tf-patches/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply --check "$p" && git apply "$p" || exit 1; done
-# The structured-output shim: g++ against xgrammar, libstdc++ and libgcc linked statically inside, so
-# the engine loads it at run time with no linker dependency and no second C++ runtime in-process.
+# The structured-output shim: g++ against xgrammar, with libstdc++ linked dynamically. A static
+# runtime inside the shared object leaves xgrammar's fatal-error formatting writing through a
+# stream it never initialised (a segfault, not an exception). The engine loads it at run time.
 RUN mkdir -p /opt/tensorfold/lib && \
-    g++ -std=c++17 -O2 -fPIC -shared -Wl,-z,defs -Wl,-soname,libtfso.so -static-libstdc++ -static-libgcc \
+    g++ -std=c++17 -O2 -fPIC -shared -Wl,-z,defs -Wl,-soname,libtfso.so \
       -I/opt/xg/include -o /opt/tensorfold/lib/libtfso.so \
       /tensorfold/zig/src/core/structure/tfso.cc /opt/xg/lib/libxgrammar.a && \
     nm -D --defined-only /opt/tensorfold/lib/libtfso.so | grep -q tfso_init

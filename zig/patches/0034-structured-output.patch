@@ -1,4 +1,4 @@
-# port-patches.sh: structured-output @ c436041cac50 over so-base @ 6e55468809bb (squash 6e55468809bb..c436041cac50)
+# port-patches.sh: structured-output @ 25549ddf233b over so-base @ 6e55468809bb (squash 6e55468809bb..25549ddf233b)
 # structured output: xgrammar-constrained decoding
 # Applied by zig/Dockerfile with git apply after the hand-written patches; regenerate with scripts/port-patches.sh, do not edit.
 diff --git a/build.zig b/build.zig
@@ -793,10 +793,10 @@ index 0000000000000000000000000000000000000000..29001b6980afad9e55fd3ff4b0ca4443
 +};
 diff --git a/zig/src/core/structure/tfso.cc b/zig/src/core/structure/tfso.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd089b08b81b47784b3ed451b5ff5b9434921c61
+index 0000000000000000000000000000000000000000..739b65bfb47ec99270db2f2499ddc53f4854db83
 --- /dev/null
 +++ b/zig/src/core/structure/tfso.cc
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,243 @@
 +//! The shim's implementation: xgrammar 0.2.2 behind tfso.h. C++ stays on this side of the
 +//! boundary; only POD crosses to Zig. Every xgrammar call is wrapped: the library throws
 +//! (XGrammarError and friends) instead of returning status, so an uncaught exception would
@@ -810,6 +810,7 @@ index 0000000000000000000000000000000000000000..cd089b08b81b47784b3ed451b5ff5b94
 +#include <xgrammar/tokenizer_info.h>
 +
 +#include <cstdio>
++#include <cstdlib>
 +#include <cstring>
 +#include <memory>
 +#include <optional>
@@ -824,6 +825,13 @@ index 0000000000000000000000000000000000000000..cd089b08b81b47784b3ed451b5ff5b94
 +}
 +
 +void set_err(char* err, int cap, const std::exception& e) { set_err(err, cap, e.what()); }
++
++/// TF_DS_SO_TRACE=1: name every input before compiling it. xgrammar's fatal path can abort the
++/// process, so the last line on stderr is the only record of what it refused.
++void tfso_trace(const char* what, const char* detail) {
++    if (std::getenv("TF_DS_SO_TRACE") == nullptr) return;
++    std::fprintf(stderr, "tfso: %s: %.400s\n", what, detail != nullptr ? detail : "");
++}
 +
 +}  // namespace
 +
@@ -892,6 +900,7 @@ index 0000000000000000000000000000000000000000..cd089b08b81b47784b3ed451b5ff5b94
 +            set_err(err, cap, "no context or schema");
 +            return nullptr;
 +        }
++        tfso_trace("json_schema", schema);
 +        auto g = ctx->compiler->CompileJSONSchema(std::string(schema),
 +                                                  /*any_whitespace=*/false,
 +                                                  /*indent=*/std::nullopt,
@@ -913,6 +922,7 @@ index 0000000000000000000000000000000000000000..cd089b08b81b47784b3ed451b5ff5b94
 +            set_err(err, cap, "no context or pattern");
 +            return nullptr;
 +        }
++        tfso_trace("regex", pattern);
 +        auto g = ctx->compiler->CompileRegex(std::string(pattern));
 +        return new tfso_grammar(std::move(g));
 +    } catch (const std::exception& e) {
@@ -930,6 +940,7 @@ index 0000000000000000000000000000000000000000..cd089b08b81b47784b3ed451b5ff5b94
 +            set_err(err, cap, "no context or grammar");
 +            return nullptr;
 +        }
++        tfso_trace("grammar", ebnf);
 +        auto g = ctx->compiler->CompileGrammar(xgrammar::Grammar::FromEBNF(std::string(ebnf)));
 +        return new tfso_grammar(std::move(g));
 +    } catch (const std::exception& e) {
