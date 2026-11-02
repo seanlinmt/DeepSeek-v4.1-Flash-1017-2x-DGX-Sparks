@@ -148,7 +148,8 @@ if (( ! DRY )) && [[ "$MODE" == start ]] && running_here && running_worker 1; th
   [[ "$live_head" == "$live_worker" ]] || die "the two running ranks disagree on the ported features ($live_head here, $live_worker on $(worker_host 1)): run ./start.sh restart"
   [[ "$live_head" == "$(port_identity)" ]] || \
     die "the running ranks use other spill / KV-shard / pool settings ($live_head, asked: $(port_identity)); run ./start.sh restart"
-  [[ "$(prepared_state 2>/dev/null)" == "$(cat "$PREPARED_MARKER" 2>/dev/null)" ]] || \
+  state=$(prepared_state) || die "cannot tell whether the setup is ready: see the error above"
+  [[ "$state" == "$(cat "$PREPARED_MARKER" 2>/dev/null)" ]] || \
     die "the requested configuration differs from the prepared server; run ./start.sh restart with the same settings (including ABLIT)"
   log "$CONTAINER_NAME is already running on both Sparks (port $PORT): nothing to do. ./start.sh restart restarts it, ./stop.sh stops it."
   exit 0
@@ -156,7 +157,15 @@ fi
 
 # ---------------------------------------------------------------- 1. setup
 step 1 "Setup: image, checkpoint, Engram's tables, weight files and kit; the worker's NFS volume and disk"
-if [[ "${PREPARE:-auto}" == 1 || ( "${PREPARE:-auto}" != 0 && "$(prepared_state 2>/dev/null)" != "$(cat "$PREPARED_MARKER" 2>/dev/null)" ) ]]; then
+# (a state that cannot be computed is an error here, not "equal to a missing marker": both read empty otherwise)
+need_prepare=0
+case "${PREPARE:-auto}" in
+  1) need_prepare=1 ;;
+  0) ;;
+  *) state=$(prepared_state) || die "cannot tell whether the setup is ready: see the error above"
+     [[ "$state" == "$(cat "$PREPARED_MARKER" 2>/dev/null)" ]] || need_prepare=1 ;;
+esac
+if (( need_prepare )); then
   if (( DRY )); then log "DRY_RUN: scripts/prepare.sh would run now (not ready yet)"
   else
     # setup builds the image and writes ~106 GB files: with ~104 GiB of a Spark's memory held by a running rank that can freeze it
@@ -256,13 +265,16 @@ foreground() {
   exit "$code"
 }
 # What both ranks' engine reads, as BertholomusAI's two-node launch has it (HF_CACHE at /hf: this Spark's own, the worker's over NFS)
+# zig/patches/0037: how long rank 1 retries its connect to rank 0 (seconds, default 300); both ranks refuse anything else
+[[ -z "${TF_DS_CONNECT_S:-}" ]] || { [[ "$TF_DS_CONNECT_S" =~ ^[1-9][0-9]{0,4}$ ]] && (( TF_DS_CONNECT_S <= 86400 )); } ||
+  die "TF_DS_CONNECT_S is a count of seconds from 1 to 86400, not $TF_DS_CONNECT_S"
 ENGINE_ENV=("TF_DS_REPLAY_FLOOR=$REPLAY_FLOOR" "TF_DS_STREAMS=$PARALLEL" "TF_RDMA_IDLE_S=$RDMA_IDLE_S" "TF_RDMA_NAP_US=$RDMA_NAP_US" "HF_HUB_OFFLINE=$HF_HUB_OFFLINE")
 [[ -z "$POOL" ]] || ENGINE_ENV+=("TF_DS_POOL=$POOL" "TF_DS_WINDOW=$CONTEXT")   # zig/patches/0008: both ranks, alike
 [[ -z "$ROUND_ROWS" ]] || ENGINE_ENV+=("TF_DS_ROUND_ROWS=$ROUND_ROWS")
 (( PREFILL_INTERLEAVE_MS == 0 )) || ENGINE_ENV+=("TF_DS_PREFILL_INTERLEAVE_MS=$PREFILL_INTERLEAVE_MS")
 ENGINE_ENV+=(${PORT_ENV[@]+"${PORT_ENV[@]}"})   # the ported features' variables, the same on both ranks (scripts/port.sh)
 ENGINE_ENV+=(${PORT_IDENT_ENV[@]+"${PORT_IDENT_ENV[@]}"})   # the spill tier's identity, the same on both ranks
-while IFS='=' read -r name _; do ENGINE_ENV+=("$name=${!name}"); done < <(env | grep -E '^(TENSORFOLD|TF_DS|TF_SPILL)_[A-Z0-9_]+=' | grep -vE '^TF_DS_(REPLAY_FLOOR|STREAMS|POOL|WINDOW|ROUND_ROWS|GRAPHS|GRAPH_CAP|HC_SIDE|L2_PREFETCH|ENGRAM_AIO|RANK_CACHE|KIT|ENGRAM|TOKEN_MAP)=' | grep -vE "^(${PORT_MAPPED_RE:-^$})=" || true)
+while IFS='=' read -r name _; do ENGINE_ENV+=("$name=${!name}"); done < <(env | grep -E '^(TENSORFOLD|TF_DS|TF_SPILL|TF_FILL)_[A-Z0-9_]+=' | grep -vE '^TF_DS_(REPLAY_FLOOR|STREAMS|POOL|WINDOW|ROUND_ROWS|GRAPHS|GRAPH_CAP|HC_SIDE|L2_PREFETCH|ENGRAM_AIO|RANK_CACHE|KIT|ENGRAM|TOKEN_MAP)=' | grep -vE "^(${PORT_MAPPED_RE:-^$})=" || true)
 envs() { local x; for x in "$@"; do printf -- '-e %q ' "$x"; done; }
 RUN_ARGS="--label tf.recipe.ablit=$(ablit_identity) --label tf.recipe.port=$(port_identity) --gpus all --ipc=host --network host --ulimit memlock=-1 --ulimit stack=67108864 --cap-add IPC_LOCK --device /dev/infiniband"
 # each rank's container log rotates (LOG_MAX_SIZE, LOG_MAX_FILE; issue #49): the engine logs every response

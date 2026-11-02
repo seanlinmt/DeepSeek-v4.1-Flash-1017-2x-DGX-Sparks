@@ -116,7 +116,7 @@ command -v hf >/dev/null || die "the Hugging Face CLI ('hf') is not installed on
 avail=$(df -B1 --output=avail "$HF_CACHE" | tail -1)
 # A checkpoint that is not in the cache under MODEL_ID's name and revision is downloaded whole (196 GiB). The cache is keyed by the
 # repo's name, so a copy downloaded under another name (the repo was renamed from ...-1017-EAQ-v1-2.9-bpw to ...-1017-EXL3-EAQ-v1-2.9-bpw) or
-# another revision does not count: refuse here when the disk cannot hold it, instead of filling the disk half way (README, Status)
+# another revision does not count: refuse here when the disk cannot hold it, instead of filling the disk half way (docs/measurements.md)
 if [[ "$ABLIT" == 1 && -f "$DATA_DIR/checkpoint/.ablit-ready" ]]; then
   SNAP="$DATA_DIR/checkpoint"
   log "Checkpoint: $SNAP (already prepared abliterated checkpoint)"
@@ -366,5 +366,5 @@ else
     die "writing rank 1's weight file on $(worker_host 1) failed"
 fi
 
-prepared_state > "$PREPARED_MARKER"
+write_prepared_marker || die "cannot record the prepared state (the previous marker is left as it was): see the error above"
 log "Done: both Sparks are ready. Start the server with ./start.sh (port $PORT)."
