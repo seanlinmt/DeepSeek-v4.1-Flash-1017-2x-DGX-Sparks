@@ -1601,10 +1601,11 @@ diff --git a/zig/src/server/server.zig b/zig/src/server/server.zig
 index 07077e2..de5a967 100644
 --- a/zig/src/server/server.zig
 +++ b/zig/src/server/server.zig
-@@ -19,6 +19,7 @@ const tool_specs = @import("tool_specs.zig");
+@@ -19,7 +19,8 @@ const tool_specs = @import("tool_specs.zig");
  const chunk_plan = @import("chunk_plan.zig");
  const log = @import("log.zig");
  const prepare_gate = @import("prepare_gate.zig");
+ const tool_streaming = @import("tool_streaming.zig");
 +const structure = @import("structure.zig");
  const Value = json.Value;
  const Cx = errors.Cx;
