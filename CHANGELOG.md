@@ -482,3 +482,43 @@
   parse as `0052` of the 4-Spark recipe
   ([pull request #49](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/pull/49)); the
   live streaming is `0048`, by **[nuk3s](https://github.com/nuk3s)**. By **Hector Isaza ([hecisaza](https://github.com/hecisaza))**.
+- `zig/patches/0066-load-prefetch.patch` (`TF_DS_LOAD_PREFETCH`, on; `0` turns it off): the rank cache is read ahead of
+  the weight loader. The loader reads the entries it does not read as a span one at a time, in file order, each read
+  waiting on the disk; eight threads now `pread` those parts of the file in 32 MiB chunks up to 4 GiB past the loader's
+  furthest read and drop the bytes, so the loader's own reads come from the page cache. The weights are unchanged.
+  This engine reads each layer's expert entries whole with direct reads, which the page cache does not serve, so the
+  read-ahead skips them, and the gain is smaller than on the 4-Spark recipe: on a pair, each rank's weight file evicted
+  from the page cache before each of three cold starts, rank 0 loaded in 34.9 s on average against 36.5 s without the
+  patch (36.8 s with `TF_DS_LOAD_PREFETCH=0`); greedy replies identical, prefill, decode and The Grill's tool step
+  unchanged. A `pread` cannot be interrupted, so on a hard-mounted NFS file an outage would hold the load's end until the
+  read returns; the recipe reads its weight files from local disk. Tests in `zig/src/families/dsv41/weights.zig` (the
+  plan; the threads read every planned byte before the loader, which reads the same bytes; the lead holds them back
+  until the loader's reads move it; finish while they wait; a chunk past the file's end; a read that fails). The 4-Spark
+  recipe's `0046` ([pull request #20](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/pull/20)),
+  by **[shalk3](https://github.com/shalk3)**; ported by **Hector Isaza ([hecisaza](https://github.com/hecisaza))**.
+- `zig/patches/0067-orphan-dsml-closer-diagnostic.patch` (always on): a reply whose whole answer is DSML closing tags (both
+  spellings) and whitespace, with tools offered, gets `tensorfold.tool_parse_warning: "orphan_dsml_closers"` in the whole
+  reply, in a chat stream's finish chunk and in a `/v1/responses` stream's final response (Messages carries no
+  `tensorfold` fields), and a log line with the reply id. Diagnostic only: content, token ids, usage and the finish reason
+  are unchanged, no call is invented and no retry started. The check reads the answer the finish parses (after the think
+  split, or the Harmony split with thinking off), which for such a reply holds no opener, so the parse returns no call in
+  either `TENSORFOLD_TOOL_STREAM` mode. On a pair, ordinary and tool-call replies logged no warning. Tests in
+  `zig/src/server/output_diagnostics.zig` and `zig/src/server/dsml_stream_test.zig` (the three routes, live and hold,
+  whole and streamed, thinking on and off, with and without tools, ended by the end token or cut by `max_tokens`, and
+  Harmony answers: every reply the same with and without the diagnostic once ids and times are set aside). `0043` of the
+  4-Spark recipe ([pull request #32](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/pull/32)),
+  by **[SvangenStudios](https://github.com/SvangenStudios)**; ported by **Hector Isaza ([hecisaza](https://github.com/hecisaza))**.
+- `zig/patches/0068-rdma-proxy-cpus.patch` (off unless set): `TF_DS_RDMA_CPUS` pins the RDMA ring's proxy thread to one
+  CPU. The proxy busy-polls while the ranks decode and holds a core at 100%; unset, it keeps the affinity it inherits, as
+  before. The value is read as on the 4-Spark recipe, `a,b,c` in the four-node order; the pair's one proxy takes the
+  first, so `TF_DS_RDMA_CPUS=0` pins it to CPU 0 (on a GB10, CPUs 0-4 and 10-14 are Cortex-A725 at 2.8 GHz, 5-9 and 15-19
+  Cortex-X925 at 3.9 GHz). A word that is not a CPU number, or a CPU the kernel refuses, leaves the proxy unpinned with no
+  message. The proxy thread is named `tf-rdma-proxy`, so `ps -L` shows it and `taskset -pc <tid>` shows where it runs.
+  The main thread is not pinned. `start.sh` forwards `TF_DS_*` to both ranks, so `export TF_DS_RDMA_CPUS=0` in
+  `scripts/local.sh` is enough. On a pair, one run per setting under a four-stream load, the proxy pinned to a
+  Cortex-A725 core showed no large temperature change (the thread that drives the GPU also holds an X925 core at 100%),
+  so the default stays unpinned. Tests in `zig/src/families/dsv41/rdma_env.zig` and `rdma.zig`. The setting comes from
+  `0001` of the 4-Spark recipe, by Mia's AI Lab, after **[making](https://github.com/making)**'s measurement there
+  ([#40](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/issues/40)): 59-67 °C pinned
+  against 70-81 °C unpinned with three proxies on a four-GB10 ring, no throughput change. Ported by **Hector Isaza
+  ([hecisaza](https://github.com/hecisaza))**.

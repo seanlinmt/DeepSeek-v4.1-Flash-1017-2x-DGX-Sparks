@@ -214,6 +214,17 @@ third-party parts keep theirs ([`NOTICE`](NOTICE)).
   [pull request #37](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/pull/37) of the 4-Spark recipe (commit
   [`0430154`](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/pull/37/commits/0430154e85ed00702a76989f7ba83282eb3eefd8)):
   a `GET` or `DELETE` body is read and dropped before its route, so a kept connection cannot hand those bytes to the next request.
+- **[shalk3](https://github.com/shalk3)** authored `zig/patches/0066-load-prefetch.patch` (`TF_DS_LOAD_PREFETCH`, the rank cache read
+  ahead of the weight loader), first as `0046` of the 4-Spark recipe in
+  [pull request #20](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/pull/20) (commit
+  [`bf514ca`](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/pull/20/commits/bf514caf66de2843baaa8b4fc7af18957ffb1bfb));
+  ported to this engine by Hector Isaza.
+- **[SvangenStudios](https://github.com/SvangenStudios)** authored `zig/patches/0067-orphan-dsml-closer-diagnostic.patch` (a diagnostic for
+  replies made only of orphan DSML closing tags), first as `0043` of the 4-Spark recipe in
+  [pull request #32](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/pull/32); ported to this engine by Hector Isaza.
+- **[making](https://github.com/making)** measured the CPU temperature with the RDMA proxies pinned to Cortex-A725 cores, in
+  [issue #40](https://github.com/MiaAI-Lab/DeepSeek-V4.1-Flash-1017-4x-DGX-Sparks-TensorFold/issues/40) of the 4-Spark recipe;
+  `zig/patches/0068-rdma-proxy-cpus.patch` ports that recipe's `TF_DS_RDMA_CPUS` (its `0001`, by Mia's AI Lab) to this engine, by Hector Isaza.
 - **eleata** ([eleata](https://github.com/eleata)) authored the engine pin `fbbc971` and the rebase of the patch series onto it, in [#77](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/pull/77).
 - **Maciej Kowalik** ([koniaik](https://github.com/koniaik)) authored `zig/patches/0029` to `0032` (the Anthropic frontend's thinking
   budget, `clear_thinking`, mid-conversation `system` and the stream keep-alive ping), in [#53](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/pull/53), [#71](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/pull/71), [#72](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/pull/72) and [#76](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-1017-2x-DGX-Sparks/pull/76).
