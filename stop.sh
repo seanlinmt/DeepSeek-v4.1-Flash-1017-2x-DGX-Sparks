@@ -54,6 +54,11 @@ done
 if (( here == 0 && any == 0 )); then
   (( unknown == 0 )) || die "No container named $CONTAINER_NAME on the Sparks it could check; one it could not check may still run one"
   [[ "${DRY_RUN:-0}" == 1 ]] || memguard_stop
+  if (( ${DRY_RUN:-0} != 1 )); then
+    if systemctl is-active --quiet gb10-tls-terminator@8888 2>/dev/null; then
+      sudo systemctl stop gb10-tls-terminator@8888 || warn "could not stop gb10-tls-terminator@8888"
+    fi
+  fi
   if (( nw <= 1 )); then log "No container named $CONTAINER_NAME on either Spark: nothing to stop"
   else log "No container named $CONTAINER_NAME on any Spark: nothing to stop"; fi
   exit 0
@@ -83,6 +88,11 @@ if [[ "${DRY_RUN:-0}" == 1 ]]; then
   exit 0
 fi
 log "Stopping $CONTAINER_NAME $where (up to ${STOP_TIMEOUT:-30}s)"
+if (( ${DRY_RUN:-0} != 1 )); then
+  if systemctl is-active --quiet gb10-tls-terminator@8888 2>/dev/null; then
+    sudo systemctl stop gb10-tls-terminator@8888 || warn "could not stop gb10-tls-terminator@8888"
+  fi
+fi
 
 # each rank: stop, save its log (with the shutdown lines), give its spill files back to their directory's owner (a
 # container started with the spill tier carries the tf.recipe.spill label; scripts/port.sh), then remove the container

@@ -221,6 +221,9 @@ if (( ! DRY )); then
   if exists_here || exists_worker 1; then ./stop.sh; fi
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   worker 1 "docker rm -f '$CONTAINER_NAME' >/dev/null 2>&1; true"
+  if systemctl is-active --quiet gb10-tls-terminator@8888 2>/dev/null; then
+    sudo systemctl stop gb10-tls-terminator@8888 || warn "could not stop gb10-tls-terminator@8888"
+  fi
   if ss -ltn "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then die "port $PORT is already in use: $(ss -ltnp "sport = :$PORT" 2>/dev/null | tail -n +2)"; fi
   # memory: a rank that takes all of a Spark's memory freezes the machine, so refuse to start on one that cannot hold it.
   # Counted as the engine's startup budget counts it (0119): MemAvailable plus the pages parked on the per-CPU free
@@ -368,6 +371,12 @@ if smoke=$(curl -s --max-time 300 "${AUTH[@]}" "$URL/v1/chat/completions" -H 'Co
              -d "{\"model\": \"$SERVED_NAME\", \"max_tokens\": 16, \"temperature\": 0, \"chat_template_kwargs\": {\"enable_thinking\": false}, \"messages\": [{\"role\": \"user\", \"content\": \"Reply with OK.\"}]}" |
            python3 -c 'import json,sys; r = json.load(sys.stdin); c = r["choices"][0]["message"].get("content") or ""; assert c.strip(); assert len(c.strip()) < 8 or len(set(c.strip())) > 2, "one repeated character"; print(repr(c.strip()[:40]) + ",", r["usage"]["completion_tokens"], "tokens")' 2>/dev/null); then
   log "OK: $smoke"
+  if (( ! DRY )); then
+    if systemctl list-unit-files gb10-tls-terminator@.service &>/dev/null; then
+      log "Starting gb10-tls-terminator@8888"
+      sudo systemctl start gb10-tls-terminator@8888 || warn "could not start gb10-tls-terminator@8888"
+    fi
+  fi
 else
   fail "the smoke test request failed (no reply text, or one character repeated); the ranks are still running"
 fi
