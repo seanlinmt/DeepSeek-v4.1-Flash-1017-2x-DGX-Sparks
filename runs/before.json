@@ -1,0 +1,590 @@
+{
+  "schema": "chronos_traffic_bench.v1",
+  "label": "before",
+  "url": "http://127.0.0.1:18888",
+  "model": "DeepSeek-V4.1-Flash-1017",
+  "salt": "chronos_bench1",
+  "seed": 7,
+  "timestamp": "2026-11-16T12:06:33.483844+00:00",
+  "suites": {
+    "burst": {
+      "seed_prefix": {
+        "prompt_tokens": 30644,
+        "completion_tokens": 1,
+        "cached_tokens": 0,
+        "ttft_s": 14.3483,
+        "total_s": 14.3484,
+        "decode_tok_s": null,
+        "started_at_rel_s": 0.0055,
+        "first_token_at_rel_s": 14.3538,
+        "finished_at_rel_s": 14.3539,
+        "token_sha": "d96726583534",
+        "finish_reason": "length",
+        "sse_events": 1,
+        "text": "OK"
+      },
+      "agent_turns": [
+        {
+          "prompt_tokens": 32098,
+          "completion_tokens": 32,
+          "cached_tokens": 28672,
+          "ttft_s": 1.9184,
+          "total_s": 2.472,
+          "decode_tok_s": 56.0,
+          "started_at_rel_s": 14.3554,
+          "first_token_at_rel_s": 16.2737,
+          "finished_at_rel_s": 16.8274,
+          "token_sha": "4b668ef31f08",
+          "finish_reason": "stop",
+          "sse_events": 17,
+          "text": "The passage is a stream of consciousness listing many common English words, touching on themes of family, work, education, community, government, and daily life."
+        },
+        {
+          "prompt_tokens": 32082,
+          "completion_tokens": 180,
+          "cached_tokens": 28672,
+          "ttft_s": 6.7494,
+          "total_s": 9.7464,
+          "decode_tok_s": 59.73,
+          "started_at_rel_s": 14.3574,
+          "first_token_at_rel_s": 21.1068,
+          "finished_at_rel_s": 24.1039,
+          "token_sha": "6491d52b61f9",
+          "finish_reason": "stop",
+          "sse_events": 85,
+          "text": "I'll summarize the key points from the text:\n\n**Main themes:**\n- **Family & people**: Many references to parents, children, friends, and community members\n- **Work & education**: Jobs, schools, teachers, students, and study appear frequently\n- **Systems & institutions**: Government, business, law, and services are recurring topics\n- **Nature & environment**: Water, mountains, gardens, winter, and rivers appear often\n- **Communication**: Signals, letters, words, and information are mentioned repeatedly\n\n**Overall impression:**\nThe text reads like a stream of consciousness or randomly generated word list, cycling through common life themes\u2014family, work, education, community, nature, and communication\u2014without forming a coherent narrative. It emphasizes ordinary daily concerns and social relationships.\n\nIf you'd like, I can also give a shorter one-sentence summary or extract specific categories."
+        },
+        {
+          "prompt_tokens": 32094,
+          "completion_tokens": 44,
+          "cached_tokens": 28672,
+          "ttft_s": 4.2505,
+          "total_s": 4.9599,
+          "decode_tok_s": 60.61,
+          "started_at_rel_s": 14.3581,
+          "first_token_at_rel_s": 18.6086,
+          "finished_at_rel_s": 19.3179,
+          "token_sha": "1432d03dd34f",
+          "finish_reason": "stop",
+          "sse_events": 21,
+          "text": "The text is a stream of consciousness word list, not a coherent narrative. It reads like randomly generated vocabulary\u2014family, school, war, water, government, etc.\u2014with no plot, characters, or argument."
+        },
+        {
+          "prompt_tokens": 32088,
+          "completion_tokens": 43,
+          "cached_tokens": 28672,
+          "ttft_s": 11.5554,
+          "total_s": 12.3631,
+          "decode_tok_s": 52.0,
+          "started_at_rel_s": 14.3603,
+          "first_token_at_rel_s": 25.9158,
+          "finished_at_rel_s": 26.7234,
+          "token_sha": "d9eba4a64d23",
+          "finish_reason": "stop",
+          "sse_events": 25,
+          "text": "The text is a stream of consciousness word list\u2014mostly nouns repeated in random order\u2014with no clear narrative or question. It reads like a vocabulary dump or an AI-generated word salad rather than a coherent passage."
+        }
+      ],
+      "short_utility": [
+        {
+          "prompt_tokens": 504,
+          "completion_tokens": 64,
+          "cached_tokens": 0,
+          "ttft_s": 12.7142,
+          "total_s": 15.1122,
+          "decode_tok_s": 26.27,
+          "started_at_rel_s": 14.8615,
+          "first_token_at_rel_s": 27.5757,
+          "finished_at_rel_s": 29.9737,
+          "token_sha": "9669c29073d1",
+          "finish_reason": "length",
+          "sse_events": 32,
+          "text": "This looks like a word-frequency exercise rather than a question. The most frequent words are:\n\n**study, work, service, company, program, state, country, power, history, education, information, system, market, question, reason, idea, word, hand, money, family, father, mother, friend"
+        },
+        {
+          "prompt_tokens": 503,
+          "completion_tokens": 16,
+          "cached_tokens": 0,
+          "ttft_s": 12.2846,
+          "total_s": 14.1739,
+          "decode_tok_s": 7.94,
+          "started_at_rel_s": 14.8618,
+          "first_token_at_rel_s": 27.1463,
+          "finished_at_rel_s": 29.0357,
+          "token_sha": "d71a70d1b11a",
+          "finish_reason": "stop",
+          "sse_events": 10,
+          "text": "The text is a random stream of common English words\u2014no coherent meaning."
+        },
+        {
+          "prompt_tokens": 502,
+          "completion_tokens": 41,
+          "cached_tokens": 0,
+          "ttft_s": 13.1412,
+          "total_s": 14.6581,
+          "decode_tok_s": 26.37,
+          "started_at_rel_s": 14.8629,
+          "first_token_at_rel_s": 28.0041,
+          "finished_at_rel_s": 29.521,
+          "token_sha": "8f9a5f22c8eb",
+          "finish_reason": "stop",
+          "sse_events": 18,
+          "text": "This looks like a random word list rather than a question. Could you clarify what you'd like me to do with it \u2014 e.g., summarize, count words, find patterns, or generate text?"
+        },
+        {
+          "prompt_tokens": 501,
+          "completion_tokens": 43,
+          "cached_tokens": 0,
+          "ttft_s": 13.553,
+          "total_s": 14.6045,
+          "decode_tok_s": 39.94,
+          "started_at_rel_s": 14.8635,
+          "first_token_at_rel_s": 28.4166,
+          "finished_at_rel_s": 29.468,
+          "token_sha": "1b1708f5a40a",
+          "finish_reason": "stop",
+          "sse_events": 18,
+          "text": "This appears to be a stream of random words rather than a coherent sentence or question. Could you clarify what you'd like me to do with it \u2014 summarize, count words, find patterns, or something else?"
+        }
+      ],
+      "summary": {
+        "agent_turns": {
+          "count": 4,
+          "errors": 0,
+          "ttft_s": {
+            "median": 5.5,
+            "mean": 6.1184,
+            "p95": 10.8345
+          },
+          "total_s": {
+            "median": 7.3531,
+            "mean": 7.3853,
+            "p95": 11.9706
+          },
+          "decode_tok_s": {
+            "median": 57.865,
+            "mean": 57.085,
+            "p95": 60.478
+          },
+          "aggregate_decode_tok_s": 28.61
+        },
+        "short_utility": {
+          "count": 4,
+          "errors": 0,
+          "ttft_s": {
+            "median": 12.9277,
+            "mean": 12.9232,
+            "p95": 13.4912
+          },
+          "total_s": {
+            "median": 14.6313,
+            "mean": 14.6372,
+            "p95": 15.0441
+          },
+          "decode_tok_s": {
+            "median": 26.32,
+            "mean": 25.13,
+            "p95": 37.9045
+          },
+          "aggregate_decode_tok_s": 58.0
+        },
+        "aggregate_decode_tok_s": 33.8
+      }
+    },
+    "cut_in": {
+      "seed_prefix": {
+        "prompt_tokens": 30672,
+        "completion_tokens": 1,
+        "cached_tokens": 0,
+        "ttft_s": 14.6123,
+        "total_s": 14.6124,
+        "decode_tok_s": null,
+        "started_at_rel_s": 0.0054,
+        "first_token_at_rel_s": 14.6177,
+        "finished_at_rel_s": 14.6178,
+        "token_sha": "d96726583534",
+        "finish_reason": "length",
+        "sse_events": 1,
+        "text": "OK"
+      },
+      "long_request": {
+        "prompt_tokens": 61344,
+        "completion_tokens": 32,
+        "cached_tokens": 0,
+        "ttft_s": 28.9479,
+        "total_s": 29.4341,
+        "decode_tok_s": 63.76,
+        "started_at_rel_s": 14.6289,
+        "first_token_at_rel_s": 43.5767,
+        "finished_at_rel_s": 44.063,
+        "token_sha": "e5dad5dd84e5",
+        "finish_reason": "stop",
+        "sse_events": 15,
+        "text": "The text is a stream-of-consciousness list of common English words\u2014mostly nouns\u2014repeated in random order, with no coherent narrative or grammatical structure."
+      },
+      "short_utility": {
+        "prompt_tokens": 511,
+        "completion_tokens": 14,
+        "cached_tokens": 0,
+        "ttft_s": 23.874,
+        "total_s": 25.797,
+        "decode_tok_s": 6.76,
+        "started_at_rel_s": 20.6303,
+        "first_token_at_rel_s": 44.5042,
+        "finished_at_rel_s": 46.4273,
+        "token_sha": "0c17f4940b66",
+        "finish_reason": "stop",
+        "sse_events": 8,
+        "text": "The passage is a random word list, not a coherent text."
+      },
+      "cached_turn": {
+        "prompt_tokens": 31658,
+        "completion_tokens": 16,
+        "cached_tokens": 28672,
+        "ttft_s": 25.6793,
+        "total_s": 25.9555,
+        "decode_tok_s": 54.31,
+        "started_at_rel_s": 20.6316,
+        "first_token_at_rel_s": 46.3109,
+        "finished_at_rel_s": 46.587,
+        "token_sha": "7bbab1d99002",
+        "finish_reason": "length",
+        "sse_events": 8,
+        "text": "I can't quite tell what you're asking \u2014 the text looks like a stream"
+      },
+      "summary": {
+        "long_request": {
+          "ttft_s": 28.9479,
+          "total_s": 29.4341,
+          "prompt_tokens": 61344,
+          "cached_tokens": 0,
+          "token_sha": "e5dad5dd84e5"
+        },
+        "short_utility": {
+          "ttft_s": 23.874,
+          "total_s": 25.797,
+          "prompt_tokens": 511,
+          "cached_tokens": 0,
+          "token_sha": "0c17f4940b66"
+        },
+        "cached_turn": {
+          "ttft_s": 25.6793,
+          "total_s": 25.9555,
+          "prompt_tokens": 31658,
+          "cached_tokens": 28672,
+          "token_sha": "7bbab1d99002"
+        }
+      }
+    },
+    "lane_reserve": {
+      "long_requests": [
+        {
+          "prompt_tokens": 32601,
+          "completion_tokens": 33,
+          "cached_tokens": 0,
+          "ttft_s": 47.4844,
+          "total_s": 48.0497,
+          "decode_tok_s": 56.61,
+          "started_at_rel_s": 0.0112,
+          "first_token_at_rel_s": 47.4957,
+          "finished_at_rel_s": 48.0609,
+          "token_sha": "d278b3441474",
+          "finish_reason": "stop",
+          "sse_events": 17,
+          "text": "The text is a long stream of common English words, with no clear sentence structure or narrative. It appears to be a word-frequency sample rather than meaningful prose."
+        },
+        {
+          "prompt_tokens": 32600,
+          "completion_tokens": 41,
+          "cached_tokens": 0,
+          "ttft_s": 31.4855,
+          "total_s": 32.1181,
+          "decode_tok_s": 63.23,
+          "started_at_rel_s": 0.0228,
+          "first_token_at_rel_s": 31.5084,
+          "finished_at_rel_s": 32.141,
+          "token_sha": "ffc7d48e829a",
+          "finish_reason": "stop",
+          "sse_events": 18,
+          "text": "The passage is a long, repetitive list of common English words, with \"house,\" \"school,\" \"winter,\" \"team,\" \"parent,\" \"office,\" and \"history\" appearing frequently."
+        },
+        {
+          "prompt_tokens": 32604,
+          "completion_tokens": 41,
+          "cached_tokens": 0,
+          "ttft_s": 15.4336,
+          "total_s": 16.1415,
+          "decode_tok_s": 56.51,
+          "started_at_rel_s": 0.0285,
+          "first_token_at_rel_s": 15.4621,
+          "finished_at_rel_s": 16.17,
+          "token_sha": "152c6792d4f3",
+          "finish_reason": "stop",
+          "sse_events": 21,
+          "text": "The passage is a long stream of short, common English words, mostly nouns, with no clear narrative or punctuation. It reads like a random word list or generated filler text rather than a coherent paragraph."
+        },
+        {
+          "prompt_tokens": 32586,
+          "completion_tokens": 80,
+          "cached_tokens": 0,
+          "ttft_s": 95.3093,
+          "total_s": 96.6614,
+          "decode_tok_s": 58.43,
+          "started_at_rel_s": 0.0563,
+          "first_token_at_rel_s": 95.3656,
+          "finished_at_rel_s": 96.7177,
+          "token_sha": "db5d8100a1f3",
+          "finish_reason": "stop",
+          "sse_events": 41,
+          "text": "The passage is a long stream of short, repetitive word pairs and triples (e.g., \"world guy kind name school kid part book teacher parent book case education research party change\"). It reads like a generated or scrambled text with no clear narrative\u2014just a dense sequence of common nouns and occasional verbs, cycling through themes of people, school, work, family, government, and daily life."
+        },
+        {
+          "prompt_tokens": 32570,
+          "completion_tokens": 40,
+          "cached_tokens": 0,
+          "ttft_s": 128.1991,
+          "total_s": 128.9531,
+          "decode_tok_s": 51.72,
+          "started_at_rel_s": 0.0507,
+          "first_token_at_rel_s": 128.2497,
+          "finished_at_rel_s": 129.0038,
+          "token_sha": "1d13358e9f28",
+          "finish_reason": "stop",
+          "sse_events": 23,
+          "text": "The passage is a long stream of consciousness listing many words and phrases, with no clear narrative or question. It appears to be a word-association or random-text sample rather than a coherent paragraph."
+        },
+        {
+          "prompt_tokens": 32616,
+          "completion_tokens": 14,
+          "cached_tokens": 0,
+          "ttft_s": 63.367,
+          "total_s": 63.6384,
+          "decode_tok_s": 47.9,
+          "started_at_rel_s": 0.0747,
+          "first_token_at_rel_s": 63.4417,
+          "finished_at_rel_s": 63.7131,
+          "token_sha": "e244c86e7801",
+          "finish_reason": "stop",
+          "sse_events": 9,
+          "text": "A man is sitting in a room, looking at a book."
+        },
+        {
+          "prompt_tokens": 32624,
+          "completion_tokens": 26,
+          "cached_tokens": 0,
+          "ttft_s": 79.083,
+          "total_s": 79.658,
+          "decode_tok_s": 43.48,
+          "started_at_rel_s": 0.0994,
+          "first_token_at_rel_s": 79.1824,
+          "finished_at_rel_s": 79.7574,
+          "token_sha": "13c2fff2dbaf",
+          "finish_reason": "stop",
+          "sse_events": 17,
+          "text": "The passage is a long stream of short, common English words with no clear narrative\u2014essentially a word-frequency-style text."
+        },
+        {
+          "prompt_tokens": 32600,
+          "completion_tokens": 34,
+          "cached_tokens": 0,
+          "ttft_s": 112.0714,
+          "total_s": 112.7215,
+          "decode_tok_s": 50.76,
+          "started_at_rel_s": 0.0927,
+          "first_token_at_rel_s": 112.1641,
+          "finished_at_rel_s": 112.8142,
+          "token_sha": "d8e96a0c151c",
+          "finish_reason": "stop",
+          "sse_events": 18,
+          "text": "The passage is a long stream of short, common English words, mostly nouns, arranged in repetitive sequences. It reads like generated filler text rather than a coherent narrative."
+        }
+      ],
+      "short_utility": [
+        {
+          "prompt_tokens": 515,
+          "completion_tokens": 22,
+          "cached_tokens": 0,
+          "ttft_s": 128.8049,
+          "total_s": 129.2495,
+          "decode_tok_s": 47.23,
+          "started_at_rel_s": 1.0941,
+          "first_token_at_rel_s": 129.899,
+          "finished_at_rel_s": 130.3435,
+          "token_sha": "18e3b961cffb",
+          "finish_reason": "stop",
+          "sse_events": 11,
+          "text": "The text is a random word list; no question is asked, so there's nothing specific to answer."
+        },
+        {
+          "prompt_tokens": 517,
+          "completion_tokens": 19,
+          "cached_tokens": 0,
+          "ttft_s": 128.3587,
+          "total_s": 129.3562,
+          "decode_tok_s": 18.05,
+          "started_at_rel_s": 1.0946,
+          "first_token_at_rel_s": 129.4534,
+          "finished_at_rel_s": 130.4508,
+          "token_sha": "4792d88301a1",
+          "finish_reason": "stop",
+          "sse_events": 14,
+          "text": "The passage is a stream of common English nouns, likely used as a benchmark text sample."
+        }
+      ],
+      "summary": {
+        "long_requests": {
+          "count": 8,
+          "errors": 0,
+          "ttft_s": {
+            "median": 71.225,
+            "mean": 71.5542,
+            "p95": 122.5544
+          },
+          "total_s": {
+            "median": 71.6482,
+            "mean": 72.2427,
+            "p95": 123.272
+          },
+          "decode_tok_s": {
+            "median": 54.115,
+            "mean": 53.58,
+            "p95": 61.55
+          },
+          "aggregate_decode_tok_s": 2.72
+        },
+        "short_utility": {
+          "count": 2,
+          "errors": 0,
+          "ttft_s": {
+            "median": 128.5818,
+            "mean": 128.5818,
+            "p95": 128.7826
+          },
+          "total_s": {
+            "median": 129.3029,
+            "mean": 129.3029,
+            "p95": 129.3509
+          },
+          "decode_tok_s": {
+            "median": 32.64,
+            "mean": 32.64,
+            "p95": 45.771
+          },
+          "aggregate_decode_tok_s": 41.11
+        },
+        "aggregate_decode_tok_s": 3.04
+      }
+    }
+  },
+  "summary": {
+    "burst": {
+      "agent_turns": {
+        "count": 4,
+        "errors": 0,
+        "ttft_s": {
+          "median": 5.5,
+          "mean": 6.1184,
+          "p95": 10.8345
+        },
+        "total_s": {
+          "median": 7.3531,
+          "mean": 7.3853,
+          "p95": 11.9706
+        },
+        "decode_tok_s": {
+          "median": 57.865,
+          "mean": 57.085,
+          "p95": 60.478
+        },
+        "aggregate_decode_tok_s": 28.61
+      },
+      "short_utility": {
+        "count": 4,
+        "errors": 0,
+        "ttft_s": {
+          "median": 12.9277,
+          "mean": 12.9232,
+          "p95": 13.4912
+        },
+        "total_s": {
+          "median": 14.6313,
+          "mean": 14.6372,
+          "p95": 15.0441
+        },
+        "decode_tok_s": {
+          "median": 26.32,
+          "mean": 25.13,
+          "p95": 37.9045
+        },
+        "aggregate_decode_tok_s": 58.0
+      },
+      "aggregate_decode_tok_s": 33.8
+    },
+    "cut_in": {
+      "long_request": {
+        "ttft_s": 28.9479,
+        "total_s": 29.4341,
+        "prompt_tokens": 61344,
+        "cached_tokens": 0,
+        "token_sha": "e5dad5dd84e5"
+      },
+      "short_utility": {
+        "ttft_s": 23.874,
+        "total_s": 25.797,
+        "prompt_tokens": 511,
+        "cached_tokens": 0,
+        "token_sha": "0c17f4940b66"
+      },
+      "cached_turn": {
+        "ttft_s": 25.6793,
+        "total_s": 25.9555,
+        "prompt_tokens": 31658,
+        "cached_tokens": 28672,
+        "token_sha": "7bbab1d99002"
+      }
+    },
+    "lane_reserve": {
+      "long_requests": {
+        "count": 8,
+        "errors": 0,
+        "ttft_s": {
+          "median": 71.225,
+          "mean": 71.5542,
+          "p95": 122.5544
+        },
+        "total_s": {
+          "median": 71.6482,
+          "mean": 72.2427,
+          "p95": 123.272
+        },
+        "decode_tok_s": {
+          "median": 54.115,
+          "mean": 53.58,
+          "p95": 61.55
+        },
+        "aggregate_decode_tok_s": 2.72
+      },
+      "short_utility": {
+        "count": 2,
+        "errors": 0,
+        "ttft_s": {
+          "median": 128.5818,
+          "mean": 128.5818,
+          "p95": 128.7826
+        },
+        "total_s": {
+          "median": 129.3029,
+          "mean": 129.3029,
+          "p95": 129.3509
+        },
+        "decode_tok_s": {
+          "median": 32.64,
+          "mean": 32.64,
+          "p95": 45.771
+        },
+        "aggregate_decode_tok_s": 41.11
+      },
+      "aggregate_decode_tok_s": 3.04
+    }
+  }
+}
