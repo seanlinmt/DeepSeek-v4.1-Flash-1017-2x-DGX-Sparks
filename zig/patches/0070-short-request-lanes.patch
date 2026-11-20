@@ -1,102 +1,290 @@
-From 8d4a25fe3568f229068b675a7509681e9cd3b534 Mon Sep 17 00:00:00 2001
+From 308e9fc348a95c19d4ab87b7784c93d98a6a955e Mon Sep 17 00:00:00 2001
 From: Sean Lin <seanlinmt@gmail.com>
-Date: Tue, 17 Nov 2026 02:37:59 +1300
-Subject: [PATCH] feat(core): reserve lanes for short requests and bypass
- pool-blocked jobs
+Date: Fri, 20 Nov 2026 12:53:12 +1300
+Subject: [PATCH] feat(core): short-request lanes, a KV cap on long admissions,
+  bounded pool-blocked bypass
 
-TF_DS_SHORT_RESERVE_LANES reserves lanes on the host for short requests so long
-requests do not monopolize all streams. A request qualifies as short if short_reserve
-is active, uncached prompt tokens fit cut_in (when set), and uncached prompt tokens
-plus max_tokens does not exceed TF_DS_SHORT_MAX_TOKENS (default 40960). Each job records
-its short qualification at admission (is_short). When a request is requeued due to
-pool room exhaustion (ContextFull), it is marked pool_blocked so qualifying short
-requests behind it in the queue can be admitted immediately out-of-order without
-waiting for full_retry.
+ShortLaneConfig (read at LaneHost.init) replaces 0070's two switches:
+TF_DS_SHORT_RESERVE_LANES (default 1, clamped to lanes - 1), TF_DS_SHORT_MAX_TOKENS
+(default 6144: uncached prompt + short-lane decode bound), TF_SHORT_TOTAL_CTX_MAX
+(default 32768: whole prompt), TF_SHORT_DEMOTE_TOKENS (default 512), TF_ACTIVE_KV_CAP
+(default 786432), TF_BYPASS_MAX_SKIPS (default 4) and TF_KV_ALLOC_STEP (default 512).
+0 turns a bound off.
+
+A request is short when its uncached prompt fits cut_in (when set), its prompt fits
+TF_SHORT_TOTAL_CTX_MAX and uncached prompt + min(max_tokens, TF_SHORT_DEMOTE_TOKENS)
+(or max_tokens when demotion is off) fits TF_DS_SHORT_MAX_TOKENS; the qualification
+no longer depends on a reserved lane. Long requests may not take the reserved lanes,
+and, with other streams admitted, are held while the admitted streams' KV estimates
+(max(prompt, context) + TF_KV_ALLOC_STEP of the decode left) and their own pass
+TF_ACTIVE_KV_CAP. A short stream that has decoded TF_SHORT_DEMOTE_TOKENS counts as
+long. The cap and the step are admission accounting only: the backend's pool
+allocates as before.
+
+A request refused for room (ContextFull, or a restore waitRoom refuses) is marked
+pool_blocked and waits at the front (full_wait) as before; short requests behind it
+are admitted past it at once, TF_BYPASS_MAX_SKIPS of them at most per wait (a pass
+then refused for room counts too). A refused bypass goes back behind the waiting
+requests and leaves full_wait/full_retry as they are, so it never delays the front.
+pool_blocked clears with full_wait (fewer streams, full_retry, or the front
+cancelled), while bypass_skips resets only when active streams drop, the front
+request is cancelled, or the retried front request succeeds. When a front request in
+ready or queued is held from TF_ACTIVE_KV_CAP specifically because of admitted short
+streams (capBlockedByShort: either its KV estimate exceeds the cap with only short
+streams active, or it would fit alongside admitted long streams alone), short
+bypasses past it are likewise bounded by TF_BYPASS_MAX_SKIPS (cap_wait_id /
+cap_skips), clearing when the front runs, is cancelled, or is no longer blocked by
+short streams, so >TF_ACTIVE_KV_CAP or short-KV-blocked long requests do not starve.
+Woken restores in ready are scanned in order with the same cut-in and admission
+checks before falling through to queued.
 ---
- zig/src/core/lane_host.zig      | 119 +++++++++++++++++++++-----
- zig/src/core/lane_host_test.zig | 144 ++++++++++++++++++++++++++++++++
- 2 files changed, 242 insertions(+), 21 deletions(-)
+ zig/src/core/lane_host.zig      | 308 +++++++++++++++++++---
+ zig/src/core/lane_host_test.zig | 449 ++++++++++++++++++++++++++++++++
+ 2 files changed, 725 insertions(+), 32 deletions(-)
 
 diff --git a/zig/src/core/lane_host.zig b/zig/src/core/lane_host.zig
-index 5245739..4d086ef 100644
+index 9d3e89f..2fb23d7 100644
 --- a/zig/src/core/lane_host.zig
 +++ b/zig/src/core/lane_host.zig
-@@ -79,6 +79,8 @@ pub const LaneHost = struct {
+@@ -79,6 +79,14 @@ pub const LaneHost = struct {
      interleave_ns: i96 = 0,
      passing: ?*Job = null, // the job whose prompt pass runs inside addStream (Stream.between's caller)
      between_err: ?anyerror = null,
-+    short_reserve: usize = 0,
-+    short_max_tokens: usize = 40960,
++    // short-request lanes (ShortLaneConfig, TF_DS_SHORT_* / TF_SHORT_* / TF_ACTIVE_KV_CAP / TF_BYPASS_MAX_SKIPS /
++    // TF_KV_ALLOC_STEP): lanes kept for short requests, an aggregate KV cap on long admissions, and short requests let
++    // past a front request that waits for room (full_wait) or is held from active_kv_cap by admitted short streams,
++    // bypass_max_skips of them at most per wait
++    short: ShortLaneConfig = .{},
++    bypass_skips: u32 = 0,
++    cap_wait_id: ?Id = null, // front job held from active_kv_cap by admitted short streams (bounded by bypass_max_skips)
++    cap_skips: u32 = 0,
      // -- parked requests (0110). The lists are the engine thread's; changes take the lock (status reads their lengths).
      ready: std.ArrayList(*Job) = .empty, // woken: admitted before the queue, in the order they woke
      loading: std.ArrayList(Load) = .empty, // each waits for a restore job (several may share one)
-@@ -234,6 +236,8 @@ pub const LaneHost = struct {
+@@ -211,6 +219,38 @@ pub const LaneHost = struct {
+         restores_room_wait_expired: u64 = 0, // of them, admitted on memory at load_wait_ns
+     };
+ 
++    /// Short-request lanes and the long admissions' KV cap (LaneHost.init reads them from the environment; 0 turns a
++    /// bound off). A request is short when its uncached prompt tokens fit cut_in (when set), its whole prompt fits
++    /// total_ctx_max, and uncached prompt tokens + its short-lane decode bound (min(max_tokens, demote_tokens), or
++    /// max_tokens when demotion is off) fit max_tokens.
++    pub const ShortLaneConfig = struct {
++        reserve: u32 = 1, // TF_DS_SHORT_RESERVE_LANES: lanes long requests may not take (clamped to lanes - 1)
++        max_tokens: u32 = 6144, // TF_DS_SHORT_MAX_TOKENS: uncached prompt tokens + short-lane decode bound
++        total_ctx_max: u32 = 32768, // TF_SHORT_TOTAL_CTX_MAX: cached + uncached prompt tokens
++        demote_tokens: u32 = 512, // TF_SHORT_DEMOTE_TOKENS: a short stream decoding this many tokens counts as long
++        active_kv_cap: u32 = 786432, // TF_ACTIVE_KV_CAP: admitted streams' estimated KV tokens, for long admissions
++        bypass_max_skips: u32 = 4, // TF_BYPASS_MAX_SKIPS: short admissions past a front waiting for room or held from active_kv_cap by short streams
++        kv_alloc_step: u32 = 512, // TF_KV_ALLOC_STEP: decode tokens a stream's KV estimate runs ahead of its context
++
++        pub fn fromEnv() ShortLaneConfig {
++            const d: ShortLaneConfig = .{};
++            return .{
++                .reserve = envU32("TF_DS_SHORT_RESERVE_LANES", d.reserve),
++                .max_tokens = envU32("TF_DS_SHORT_MAX_TOKENS", d.max_tokens),
++                .total_ctx_max = envU32("TF_SHORT_TOTAL_CTX_MAX", d.total_ctx_max),
++                .demote_tokens = envU32("TF_SHORT_DEMOTE_TOKENS", d.demote_tokens),
++                .active_kv_cap = envU32("TF_ACTIVE_KV_CAP", d.active_kv_cap),
++                .bypass_max_skips = envU32("TF_BYPASS_MAX_SKIPS", d.bypass_max_skips),
++                .kv_alloc_step = envU32("TF_KV_ALLOC_STEP", d.kv_alloc_step),
++            };
++        }
++
++        fn envU32(name: [*:0]const u8, default: u32) u32 {
++            const v = std.c.getenv(name) orelse return default;
++            return std.fmt.parseInt(u32, std.mem.span(v), 10) catch default;
++        }
++    };
++
+     const Job = struct {
+         host: *LaneHost,
+         id: Id,
+@@ -234,6 +274,8 @@ pub const LaneHost = struct {
          fork: u32 = 0,
          lineage: []pc.Fork = &.{}, // the computation its pass's rows belong to (gpa-owned; Store.passLineage)
          whole: bool = false, // refused as a cut-in (error.FillBusy: its kept state gone): it waits for the pass in pieces
-+        is_short: bool = false,
-+        pool_blocked: bool = false,
++        is_short: bool = false, // qualified as short when last admitted (qualifiesAsShort); demoted by isLongNow
++        pool_blocked: bool = false, // refused for room (ContextFull): skipped by the scan until full_wait clears
  
          /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
          fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
-@@ -285,6 +289,30 @@ pub const LaneHost = struct {
+@@ -285,6 +327,137 @@ pub const LaneHost = struct {
          return @min(@as(usize, e.at), r.prompt.len);
      }
  
-+    /// Whether a request qualifies as short: short_reserve is active, uncached prompt tokens fit
-+    /// cut_in (when set), and uncached prompt tokens + max_tokens fit short_max_tokens.
-+    fn isShort(h: *LaneHost, r: *const Request) bool {
-+        if (h.short_reserve == 0) return false;
-+        const compute = r.prompt.len -| h.resumable(r);
-+        if (h.core.cut_in > 0 and compute > h.core.cut_in) return false;
-+        return compute +| @as(usize, r.max_tokens) <= h.short_max_tokens;
++    /// Whether a request is short (ShortLaneConfig): its uncached prompt tokens fit cut_in (when set), its whole prompt
++    /// fits total_ctx_max, and uncached prompt tokens + its short-lane decode bound (demote_tokens when set, else
++    /// max_tokens) fit max_tokens. Not tied to reserve > 0: a short request may pass a front request that waits for room
++    /// with no lane reserved.
++    fn qualifiesAsShort(h: *LaneHost, r: *const Request) bool {
++        const uncached = r.prompt.len -| h.resumable(r);
++        if (h.core.cut_in > 0 and uncached > h.core.cut_in) return false;
++        if (h.short.total_ctx_max > 0 and r.prompt.len > h.short.total_ctx_max) return false;
++        if (h.short.max_tokens > 0) {
++            const out = if (h.short.demote_tokens > 0) @min(r.max_tokens, h.short.demote_tokens) else r.max_tokens;
++            if (uncached +| @as(usize, out) > h.short.max_tokens) return false;
++        }
++        return true;
 +    }
 +
-+    /// Count of admitted jobs that did not qualify as short when admitted.
++    /// An admitted job counts as long: it did not qualify as short, or it has decoded demote_tokens since (the lock held).
++    fn isLongNow(h: *const LaneHost, job: *const Job) bool {
++        if (!job.is_short) return true;
++        const d = h.short.demote_tokens;
++        return d > 0 and job.started and job.stream.emitted().len >= d;
++    }
++
 +    fn longAdmittedCount(h: *const LaneHost) usize {
 +        var count: usize = 0;
-+        for (h.admitted.items) |job| {
-+            if (!job.is_short) count += 1;
-+        }
++        for (h.admitted.items) |job| if (h.isLongNow(job)) {
++            count += 1;
++        };
 +        return count;
 +    }
 +
-+    /// Whether another non-short job may be admitted while keeping `short_reserve` lanes free.
-+    fn hasLongRoom(h: *const LaneHost) bool {
-+        if (h.short_reserve == 0) return true;
-+        return h.longAdmittedCount() < (h.info_.lanes -| h.short_reserve);
++    /// A stream's KV estimate: its context, and kv_alloc_step tokens of the decode left (all of it when the step is 0).
++    fn kvEstimate(h: *const LaneHost, prompt: usize, context: usize, left: usize) usize {
++        const ahead = if (h.short.kv_alloc_step > 0) @min(left, h.short.kv_alloc_step) else left;
++        return @max(prompt, context) +| ahead;
++    }
++
++    /// An admitted job's current KV estimate (the lock held).
++    fn jobKvEstimate(h: *const LaneHost, job: *const Job) usize {
++        const r = job.request;
++        return if (job.started)
++            h.kvEstimate(r.prompt.len, job.stream.context.items.len, @intCast(@max(job.stream.budgetLeft(), 0)))
++        else
++            h.kvEstimate(r.prompt.len, 0, r.max_tokens);
++    }
++
++    /// The admitted streams' KV estimates together (the lock held).
++    fn activeKvTokens(h: *const LaneHost) usize {
++        var total: usize = 0;
++        for (h.admitted.items) |job| total +|= h.jobKvEstimate(job);
++        return total;
++    }
++
++    /// Whether `job` may take a free lane: a long one keeps `reserve` lanes for short requests and, with other streams
++    /// admitted, keeps their KV estimates and its own within active_kv_cap (the lock held).
++    fn canAdmitJob(h: *const LaneHost, job: *const Job, short: bool) bool {
++        if (h.admitted.items.len >= h.info_.lanes) return false;
++        if (short) return true;
++        if (h.longAdmittedCount() >= h.info_.lanes -| h.short.reserve) return false;
++        const cap = h.short.active_kv_cap;
++        if (cap > 0 and h.admitted.items.len > 0) {
++            const r = job.request;
++            if (h.activeKvTokens() +| h.kvEstimate(r.prompt.len, 0, r.max_tokens) > cap) return false;
++        }
++        return true;
++    }
++
++    /// Whether `j` may be selected from `ready` or `queued` now (the lock held); sets `j.is_short` when true.
++    fn canSelect(h: *LaneHost, j: *Job, bypass_only: bool) bool {
++        if (j.pool_blocked) return false;
++        const r = j.request;
++        if (h.filling != null) {
++            if (j.whole) return false;
++            const from = h.resumable(r);
++            if (!h.core.cutsIn(r.prompt.len - from, lanes.Engine.picturesPast(r.images, from))) return false;
++        }
++        const short = h.qualifiesAsShort(r);
++        if (bypass_only and !short) return false;
++        if (!h.canAdmitJob(j, short)) return false;
++        j.is_short = short;
++        return true;
++    }
++
++    /// The front request no longer waits for room: every request refused for room may be tried again (the lock held).
++    fn clearFullWait(h: *LaneHost) void {
++        h.full_wait = null;
++        h.bypass_skips = 0;
++        for (h.queued.items) |j| j.pool_blocked = false;
++    }
++
++    /// Whether `job` (a long front request) is held by active_kv_cap specifically because of admitted short streams:
++    /// either its own KV estimate exceeds active_kv_cap and only short streams remain admitted (so it needs admitted == 0),
++    /// or it would fit under active_kv_cap alongside the admitted long streams alone (the lock held).
++    fn capBlockedByShort(h: *LaneHost, job: *const Job) bool {
++        const cap = h.short.active_kv_cap;
++        if (cap == 0 or h.admitted.items.len == 0) return false;
++        if (job.pool_blocked) return false;
++        const r = job.request;
++        if (h.qualifiesAsShort(r)) return false;
++        if (h.longAdmittedCount() >= h.info_.lanes -| h.short.reserve) return false;
++        const need = h.kvEstimate(r.prompt.len, 0, r.max_tokens);
++        var long_count: usize = 0;
++        var long_kv: usize = 0;
++        var short_kv: usize = 0;
++        for (h.admitted.items) |a| {
++            const est = h.jobKvEstimate(a);
++            if (h.isLongNow(a)) {
++                long_count += 1;
++                long_kv +|= est;
++            } else {
++                short_kv +|= est;
++            }
++        }
++        if ((long_kv +| short_kv) +| need <= cap) return false;
++        return (need > cap and long_count == 0) or (long_kv +| need <= cap);
++    }
++
++    fn clearCapWait(h: *LaneHost) void {
++        h.cap_wait_id = null;
++        h.cap_skips = 0;
++    }
++
++    /// Where a request refused for room goes back in the queue (the lock held): the front, or, while the front already
++    /// waits for room, behind the requests waiting for it, so a short request refused as it passed them does not take
++    /// the front's place. True when the front already waits (full_wait and full_retry stay as they are).
++    fn requeueAt(h: *const LaneHost) struct { usize, bool } {
++        if (h.full_wait == null) return .{ 0, false };
++        var at: usize = 0;
++        while (at < h.queued.items.len and h.queued.items[at].pool_blocked) at += 1;
++        return .{ at, true };
 +    }
 +
      /// The pictures' identities the durable tier gets for a request: its `cache_media` only when they name exactly the
      /// spans the engine runs (`images`: the spans its restored rows and tower work are placed by), one for one; anything
      /// else gives none, and the tier then misses and keeps nothing for it (a disk hit must not resume pictures placed
-@@ -300,7 +328,12 @@ pub const LaneHost = struct {
+@@ -300,7 +473,9 @@ pub const LaneHost = struct {
          enforced.loop_guard = true;
          var ms: i96 = 0;
          if (std.c.getenv("TF_DS_PREFILL_INTERLEAVE_MS")) |v| ms = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
 -        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms };
-+        var reserve: usize = 0;
-+        if (std.c.getenv("TF_DS_SHORT_RESERVE_LANES")) |v| reserve = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0;
-+        reserve = @min(reserve, enforced.lanes -| 1);
-+        var short_max: usize = 40960;
-+        if (std.c.getenv("TF_DS_SHORT_MAX_TOKENS")) |v| short_max = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 40960;
-+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms, .short_reserve = reserve, .short_max_tokens = short_max };
++        var short = ShortLaneConfig.fromEnv();
++        short.reserve = @min(short.reserve, enforced.lanes -| 1); // a long request always has a lane
++        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced, .interleave_ns = ms * std.time.ns_per_ms, .short = short };
      }
  
      /// The tier's switches (before start). Telemetry is published from here on when either is on: a tier on the cache
-@@ -524,7 +557,10 @@ pub const LaneHost = struct {
+@@ -524,11 +699,13 @@ pub const LaneHost = struct {
              for (h.queued.items, 0..) |job, i| if (job.id == id) {
                  // the queue's front waits for room (requeue, waitRoom: full_wait holds every admission meanwhile);
                  // cancelled, nothing waits for it any more
 -                if (i == 0) h.full_wait = null;
-+                if (i == 0) {
-+                    h.full_wait = null;
-+                    for (h.queued.items) |j| j.pool_blocked = false;
-+                }
++                if (i == 0) h.clearFullWait();
++                if (h.cap_wait_id == job.id) h.clearCapWait();
                  dropped.append(h.gpa, h.queued.orderedRemove(i)) catch {};
                  break;
              };
-@@ -586,25 +622,12 @@ pub const LaneHost = struct {
+             for (h.ready.items, 0..) |job, i| if (job.id == id) {
++                if (h.cap_wait_id == job.id) h.clearCapWait();
+                 dropped.append(h.gpa, h.ready.orderedRemove(i)) catch {};
+                 break;
+             };
+@@ -578,7 +755,9 @@ pub const LaneHost = struct {
+         h.mutex.unlock(h.io);
+     }
+ 
+-    /// Prefills the next queued request (while a pass fills, the first that core.cutsIn); false if none or no lane.
++    /// Prefills the next request the lanes admit (canAdmitJob; while a pass fills, the first that core.cutsIn; while the
++    /// front waits for room or is held from active_kv_cap by admitted short streams, a short one, bypass_max_skips at
++    /// most); false if none or no lane.
+     fn admitOne(h: *LaneHost) bool {
+         if (h.isBroken()) return false;
+         h.lock();
+@@ -586,38 +765,86 @@ pub const LaneHost = struct {
              h.unlock();
              return false;
          }
@@ -108,264 +296,619 @@ index 5245739..4d086ef 100644
 -                const from = h.resumable(r);
 -                if (h.core.cutsIn(r.prompt.len - from, lanes.Engine.picturesPast(r.images, from))) break i;
 -            } else {
--                h.unlock();
--                return false;
++        if (h.finish_until) |t| {
++            if (std.Io.Clock.awake.now(h.io).toNanoseconds() < t and h.nearEnd()) {
+                 h.unlock();
+                 return false;
 -            };
--        }
++            }
++            h.finish_until = null;
+         }
++        var retry_skips: u32 = 0;
          if (h.full_wait) |n| {
              const active = h.core.activeCount();
 -            if (active > 0 and active >= n and std.Io.Clock.awake.now(h.io).toNanoseconds() < h.full_retry) {
 -                h.unlock();
 -                return false;
-+            if (active == 0 or active < n or std.Io.Clock.awake.now(h.io).toNanoseconds() >= h.full_retry) {
-+                h.full_wait = null;
-+                for (h.queued.items) |j| j.pool_blocked = false;
++            if (active == 0 or active < n) {
++                h.clearFullWait();
++            } else if (std.Io.Clock.awake.now(h.io).toNanoseconds() >= h.full_retry) {
++                retry_skips = h.bypass_skips;
++                h.clearFullWait();
              }
 -            h.full_wait = null;
          }
-         if (h.finish_until) |t| {
-             if (std.Io.Clock.awake.now(h.io).toNanoseconds() < t and h.nearEnd()) {
-@@ -613,8 +636,44 @@ pub const LaneHost = struct {
-             }
-             h.finish_until = null;
-         }
-+        const long_room = h.hasLongRoom();
-         // a woken (restored) request goes first, but not while a pass fills: then only a queued one that cuts in
+-        if (h.finish_until) |t| {
+-            if (std.Io.Clock.awake.now(h.io).toNanoseconds() < t and h.nearEnd()) {
++        const waiting = h.full_wait != null; // the front waits for room: only short requests pass it, a few at most
++        if (waiting and h.bypass_skips >= h.short.bypass_max_skips) {
++            h.unlock();
++            return false;
++        }
++        // When a front request is held from active_kv_cap because of admitted short streams, bound short bypasses past it
++        // by bypass_max_skips too so >active_kv_cap or short-KV-blocked long requests drain instead of starving.
++        const cap_front: ?*Job = if (!waiting and retry_skips == 0 and h.filling == null)
++            (if (h.ready.items.len > 0) h.ready.items[0] else if (h.queued.items.len > 0) h.queued.items[0] else null)
++        else
++            null;
++        const cap_wait = if (cap_front) |front| blk: {
++            if (!h.capBlockedByShort(front)) {
++                if (h.cap_wait_id == front.id) h.clearCapWait();
++                break :blk false;
++            }
++            if (h.cap_wait_id != front.id) {
++                h.cap_wait_id = front.id;
++                h.cap_skips = 0;
++            }
++            break :blk true;
++        } else false;
++        // a woken (restored) request goes first when the lanes admit it (and it cuts in while a pass fills), but not
++        // while the front waits for room; if none in `ready` is eligible, fall through to `queued`
++        const woken: ?*Job = if (!waiting and retry_skips == 0) blk: {
++            for (h.ready.items, 0..) |j, i| {
++                const skipping_front = cap_wait and cap_front != null and j != cap_front.?;
++                if (skipping_front and h.cap_skips >= h.short.bypass_max_skips) break;
++                if (!h.canSelect(j, skipping_front)) continue;
++                if (skipping_front) h.cap_skips += 1;
++                break :blk h.ready.orderedRemove(i);
++            }
++            break :blk null;
++        } else null;
++        var front_retry = false;
++        const job = woken orelse blk: {
++            const found: ?usize = for (h.queued.items, 0..) |j, i| {
++                const skipping_front = cap_wait and cap_front != null and j != cap_front.?;
++                if (skipping_front and h.cap_skips >= h.short.bypass_max_skips) break null;
++                const bypass_only = waiting or skipping_front or (i > 0 and h.filling == null);
++                if (!h.canSelect(j, bypass_only)) continue;
++                if (waiting) h.bypass_skips += 1; // (counted as tried: a bypass refused for room counts too)
++                if (skipping_front) h.cap_skips += 1;
++                break i;
++            } else null;
++            const at = found orelse {
+                 h.unlock();
+                 return false;
+-            }
+-            h.finish_until = null;
+-        }
+-        // a woken (restored) request goes first, but not while a pass fills: then only a queued one that cuts in
 -        const job = if (h.filling == null and h.ready.items.len > 0) h.ready.orderedRemove(0) else h.queued.orderedRemove(at);
-+        const job: *Job = if (h.filling != null) blk: {
-+            const idx = for (h.queued.items, 0..) |j, i| {
-+                if (j.whole or j.pool_blocked) continue;
-+                const r = j.request;
-+                const short = h.isShort(r);
-+                if (h.full_wait != null and !short) continue;
-+                if (!long_room and !short) continue;
-+                const from = h.resumable(r);
-+                if (h.core.cutsIn(r.prompt.len - from, lanes.Engine.picturesPast(r.images, from))) {
-+                    j.is_short = short;
-+                    break i;
-+                }
-+            } else {
-+                h.unlock();
-+                return false;
 +            };
-+            break :blk h.queued.orderedRemove(idx);
-+        } else if (h.ready.items.len > 0 and (h.full_wait == null or h.isShort(h.ready.items[0].request))) blk: {
-+            const j = h.ready.orderedRemove(0);
-+            if (h.full_wait != null) j.is_short = true else j.is_short = h.isShort(j.request);
-+            break :blk j;
-+        } else blk: {
-+            const idx = for (h.queued.items, 0..) |j, i| {
-+                if (j.pool_blocked) continue;
-+                const short = h.isShort(j.request);
-+                if (h.full_wait != null and !short) continue;
-+                if (long_room or short) {
-+                    j.is_short = short;
-+                    break i;
-+                }
-+            } else {
-+                h.unlock();
-+                return false;
-+            };
-+            break :blk h.queued.orderedRemove(idx);
++            front_retry = (at == 0 and retry_skips > 0);
++            break :blk h.queued.orderedRemove(at);
 +        };
++        if (h.cap_wait_id == job.id) h.clearCapWait();
          if (h.parking()) {
              h.unlock();
-             if (h.park(job)) return true; // waits for a restore, holding no lane
-@@ -689,7 +748,10 @@ pub const LaneHost = struct {
+-            if (h.park(job)) return true; // waits for a restore, holding no lane
++            if (h.park(job)) {
++                if (front_retry) {
++                    h.lock();
++                    if (h.full_wait != null) h.bypass_skips = retry_skips;
++                    h.unlock();
++                }
++                return true; // waits for a restore, holding no lane
++            }
+             h.lock();
+         }
+         h.admitted.append(h.gpa, job) catch {
+@@ -696,8 +923,18 @@ pub const LaneHost = struct {
+         added catch |e| {
              if (h.isBroken()) return h.dropBroken(job);
              if (e == error.Cancelled) return h.cancel(job);
-             // refused for room: while other streams run or a pass fills (this one cut in), it waits in the queue
+-            // refused for room: while other streams run or a pass fills (this one cut in), it waits in the queue
 -            if (e == error.ContextFull and (h.core.activeCount() > 0 or h.filling != null)) return h.requeue(job);
++            // refused for room: while other streams run or a pass fills (this one cut in), it waits in the queue; while
++            // streams run, a short request behind it may be tried at once (true: admitOne runs again and finds one or none)
 +            if (e == error.ContextFull and (h.core.activeCount() > 0 or h.filling != null)) {
 +                job.pool_blocked = true;
-+                return h.requeue(job);
++                _ = h.requeue(job);
++                if (front_retry) {
++                    h.lock();
++                    if (h.full_wait != null) h.bypass_skips = retry_skips;
++                    h.unlock();
++                }
++                return h.core.activeCount() > 0;
 +            }
              // refused as a cut-in (its kept state gone as its pass opened): it waits for the pass in pieces, not
              // tried again between that pass's pieces
              if (e == error.FillBusy and h.filling != null) {
-@@ -910,8 +972,22 @@ pub const LaneHost = struct {
+@@ -911,13 +1148,16 @@ pub const LaneHost = struct {
+         h.gpa.free(job.lineage);
+         job.lineage = &.{};
+         h.lock();
+-        h.queued.insert(h.gpa, 0, job) catch {
++        const at, const already = h.requeueAt();
++        h.queued.insert(h.gpa, at, job) catch {
+             h.unlock();
+             h.finish(job, .failed, "out of memory");
+             return true;
          };
-         h.full_wait = h.core.activeCount();
-         h.full_retry = std.Io.Clock.awake.now(h.io).toNanoseconds() + full_retry_ns;
-+        const has_more = blk: {
-+            if (h.admitted.items.len >= h.info_.lanes) break :blk false;
-+            if (h.filling == null and h.ready.items.len > 0 and h.isShort(h.ready.items[0].request)) break :blk true;
-+            for (h.queued.items) |j| {
-+                if (j.pool_blocked) continue;
-+                if (!h.isShort(j.request)) continue;
-+                if (h.filling != null) {
-+                    if (j.whole) continue;
-+                    const from = h.resumable(j.request);
-+                    if (h.core.cutsIn(j.request.prompt.len - from, lanes.Engine.picturesPast(j.request.images, from))) break :blk true;
-+                } else break :blk true;
-+            }
-+            break :blk false;
-+        };
+-        h.full_wait = h.core.activeCount();
+-        h.full_retry = std.Io.Clock.awake.now(h.io).toNanoseconds() + full_retry_ns;
++        if (!already) {
++            h.full_wait = h.core.activeCount();
++            h.full_retry = std.Io.Clock.awake.now(h.io).toNanoseconds() + full_retry_ns;
++        }
          h.unlock();
--        return false;
-+        return has_more;
+         return false;
      }
- 
-     /// A job cancelled in its prompt pass, its lane already released.
-@@ -1173,6 +1249,7 @@ pub const LaneHost = struct {
-             note("reading {d} kept tokens from disk waited {d} ms for room in the pool ({d} streams hold it); it waits no longer", .{ p.at, @divTrunc(now - first, std.time.ns_per_ms), active });
+@@ -1182,12 +1422,16 @@ pub const LaneHost = struct {
              return false;
          }
-+        job.pool_blocked = true;
          h.lock();
-         h.queued.insert(h.gpa, 0, job) catch {
+-        h.queued.insert(h.gpa, 0, job) catch {
++        const at, const already = h.requeueAt();
++        h.queued.insert(h.gpa, at, job) catch {
              h.unlock();
+             return false;
+         };
+-        h.full_wait = active;
+-        h.full_retry = @min(now + full_retry_ns, first + h.tier.load_wait_ns);
++        job.pool_blocked = true;
++        if (!already) {
++            h.full_wait = active;
++            h.full_retry = @min(now + full_retry_ns, first + h.tier.load_wait_ns);
++        }
+         h.unlock();
+         job.tried_disk = false; // (it asks for the restore again at its next admission)
+         if (job.room_since == null) {
 diff --git a/zig/src/core/lane_host_test.zig b/zig/src/core/lane_host_test.zig
-index 4b18c36..1b62f34 100644
+index 4b18c36..d3eb9fd 100644
 --- a/zig/src/core/lane_host_test.zig
 +++ b/zig/src/core/lane_host_test.zig
-@@ -517,3 +517,147 @@ test "a cut-in its backend refuses as its pass opens (its kept state gone) waits
+@@ -517,3 +517,452 @@ test "a cut-in its backend refuses as its pass opens (its kept state gone) waits
      for (order[0..6], 0..) |o, i| try std.testing.expectEqual([2]usize{ CutIn.long.len, i }, o);
      for (order[6..12], 0..) |o, i| try std.testing.expectEqual([2]usize{ 3, i }, o);
  }
-+test "with short_reserve on, a lane is kept for a short request while a second long request waits" {
-+    const gpa = std.testing.allocator;
-+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
-+    defer cfg.deinit(gpa);
-+    var target: lanes.fake.Fake = .{ .gpa = gpa };
-+    defer target.deinit();
-+    var clock: lanes.fake.FixedClock = .{};
-+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
-+    defer core.deinit();
-+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
-+    host.short_reserve = 1;
-+    host.short_max_tokens = 100;
-+    try host.start();
-+    defer host.stop();
 +
-+    const Box = struct {
-+        mutex: std.Io.Mutex = .init,
-+        done: ?Reason = null,
-+        tokens: usize = 0,
-+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
-+            const b: *@This() = @ptrCast(@alignCast(ctx));
-+            b.mutex.lockUncancelable(std.testing.io);
-+            defer b.mutex.unlock(std.testing.io);
-+            switch (e.*) {
-+                .tokens => |t| b.tokens += t.len,
-+                .finished => |f| b.done = f.reason,
-+                else => {},
-+            }
-+        }
-+        fn state(b: *@This()) struct { ?Reason, usize } {
-+            b.mutex.lockUncancelable(std.testing.io);
-+            defer b.mutex.unlock(std.testing.io);
-+            return .{ b.done, b.tokens };
-+        }
-+        fn waitFor(b: *@This(), ms: u32) ?Reason {
-+            for (0..ms) |_| {
-+                if (b.state()[0]) |r| return r;
-+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
-+            }
-+            return b.state()[0];
-+        }
-+    };
++test "a cut-in repeatedly refused for room while a pass fills with no stream active yields to the pass's next pieces" {
++    const order = try CutIn.run(&.{ 3, 1, 4 }, .{ .refuse_full = 5 });
++    defer std.testing.allocator.free(order);
++    try std.testing.expectEqual(@as(usize, 12), order.len);
++    for (order[0..6], 0..) |o, i| try std.testing.expectEqual([2]usize{ CutIn.long.len, i }, o);
++    for (order[6..12], 0..) |o, i| try std.testing.expectEqual([2]usize{ 3, i }, o);
++}
 +
++// -- short-request lanes (ShortLaneConfig) -------------------------------------------------------------------------
++
++/// A request's events: its tokens so far and how it ended.
++const ShortBox = struct {
++    mutex: std.Io.Mutex = .init,
++    done: ?Reason = null,
++    tokens: usize = 0,
++    fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
++        const b: *@This() = @ptrCast(@alignCast(ctx));
++        b.mutex.lockUncancelable(std.testing.io);
++        defer b.mutex.unlock(std.testing.io);
++        switch (e.*) {
++            .tokens => |t| b.tokens += t.len,
++            .finished => |f| b.done = f.reason,
++            else => {},
++        }
++    }
++    fn state(b: *@This()) struct { ?Reason, usize } {
++        b.mutex.lockUncancelable(std.testing.io);
++        defer b.mutex.unlock(std.testing.io);
++        return .{ b.done, b.tokens };
++    }
++    // the reason the request ended with, or null when it has not ended within `ms`
++    fn waitFor(b: *@This(), ms: u32) ?Reason {
++        for (0..ms) |_| {
++            if (b.state()[0]) |r| return r;
++            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
++        }
++        return b.state()[0];
++    }
++    // true once it has at least `n` tokens, within `ms`
++    fn waitTokens(b: *@This(), n: usize, ms: u32) bool {
++        for (0..ms) |_| {
++            if (b.state()[1] >= n) return true;
++            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
++        }
++        return b.state()[1] >= n;
++    }
++    fn sink(b: *@This()) api.Sink {
++        return .{ .ctx = b, .event = event };
++    }
++};
++
++/// A fake backend's lane host (in place: the core and the host point into it).
++const ShortRig = struct {
++    cfg: lanes.Config,
++    target: lanes.fake.Fake,
++    clock: lanes.fake.FixedClock = .{},
++    core: lanes.Engine,
++    host: LaneHost,
++
++    fn init(r: *ShortRig, n: u32, refuse_full: usize) !void {
++        const gpa = std.testing.allocator;
++        r.cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
++        r.target = .{ .gpa = gpa, .refuse_full = refuse_full };
++        r.clock = .{};
++        r.core = lanes.Engine.init(gpa, &r.cfg, r.target.backend(), r.clock.clock());
++        r.host = LaneHost.init(gpa, std.testing.io, &r.core, .{ .lanes = n });
++    }
++    fn deinit(r: *ShortRig) void {
++        r.host.stop();
++        r.core.deinit();
++        r.target.deinit();
++        r.cfg.deinit(std.testing.allocator);
++    }
++};
++
++const short_prompt = [_]u32{ 2, 7, 1, 8 };
++
++fn sleepMs(ms: u32) void {
++    std.Io.sleep(std.testing.io, .fromMilliseconds(ms), .awake) catch {};
++}
++
++test "a one-lane host reserves no lane for short requests: a long request is admitted under the defaults" {
++    var rig: ShortRig = undefined;
++    try rig.init(1, 0);
++    defer rig.deinit();
++    try std.testing.expectEqual(@as(u32, 0), rig.host.short.reserve);
++    try rig.host.start();
++    var long: ShortBox = .{};
++    const e = rig.host.engine();
++    try e.submit(1, &.{ .prompt = &short_prompt, .max_tokens = 1 << 30 }, long.sink());
++    try std.testing.expect(long.waitTokens(1, 5000));
++    e.cancel(1);
++    try std.testing.expect(long.waitFor(5000) != null);
++}
++
++test "with a lane reserved, a second long request waits while a short request with a large max_tokens takes the reserved lane" {
++    var rig: ShortRig = undefined;
++    try rig.init(2, 0);
++    defer rig.deinit();
++    rig.host.short.reserve = 1;
++    rig.host.short.max_tokens = 100;
++    rig.host.short.demote_tokens = 32;
++    try rig.host.start();
 +    const long_prompt: [128]u32 = @splat(1);
-+    const short_prompt = [_]u32{ 2, 7, 1, 8 };
-+    var long1: Box = .{};
-+    var long2: Box = .{};
-+    var short: Box = .{};
-+    const e = host.engine();
-+
-+    // long1 prompt length (128) exceeds short_max_tokens (100)
-+    try e.submit(1, &.{ .prompt = &long_prompt, .max_tokens = 1 << 30 }, .{ .ctx = &long1, .event = Box.event });
-+    while (long1.state()[1] == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
-+
-+    // long2 max_tokens (200) exceeds short_max_tokens (100)
-+    try e.submit(2, &.{ .prompt = &short_prompt, .max_tokens = 200 }, .{ .ctx = &long2, .event = Box.event });
-+    std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch {};
++    var long1: ShortBox = .{};
++    var long2: ShortBox = .{};
++    var short: ShortBox = .{};
++    const e = rig.host.engine();
++    // long1: its prompt (128) passes max_tokens (100)
++    try e.submit(1, &.{ .prompt = &long_prompt, .max_tokens = 1 << 30 }, long1.sink());
++    try std.testing.expect(long1.waitTokens(1, 5000));
++    // long2: its prompt (128) passes max_tokens (100); the one lane left is reserved
++    try e.submit(2, &.{ .prompt = &long_prompt, .max_tokens = 200 }, long2.sink());
++    sleepMs(20);
 +    try std.testing.expectEqual(@as(usize, 0), long2.state()[1]);
-+
-+    // short request fits short_max_tokens (4 + 8 <= 100) and is admitted to the reserved lane
-+    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 8 }, .{ .ctx = &short, .event = Box.event });
-+    try std.testing.expectEqual(@as(?Reason, Reason.length), short.waitFor(5000));
-+    try std.testing.expectEqual(@as(usize, 8), short.state()[1]);
-+
++    // short: prompt (4) + min(max_tokens=16384, demote_tokens=32) = 36 <= 100, admitted to the reserved lane past long2
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 16384 }, short.sink());
++    try std.testing.expect(short.waitTokens(8, 5000));
 +    try std.testing.expectEqual(@as(usize, 0), long2.state()[1]);
-+
++    e.cancel(3);
++    try std.testing.expect(short.waitFor(5000) != null);
 +    e.cancel(1);
 +    try std.testing.expect(long1.waitFor(5000) != null);
-+
-+    for (0..5000) |_| {
-+        if (long2.state()[1] > 0) break;
-+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
-+    }
-+    try std.testing.expect(long2.state()[1] > 0);
++    try std.testing.expect(long2.waitTokens(1, 5000));
 +    e.cancel(2);
 +    try std.testing.expect(long2.waitFor(5000) != null);
 +}
 +
-+test "a request refused for room is marked pool_blocked and a short request behind it is admitted out of order" {
-+    const gpa = std.testing.allocator;
-+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
-+    defer cfg.deinit(gpa);
-+    var target: lanes.fake.Fake = .{ .gpa = gpa, .refuse_full = 1 };
-+    defer target.deinit();
-+    var clock: lanes.fake.FixedClock = .{};
-+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
-+    defer core.deinit();
-+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
-+    host.short_reserve = 1;
-+    try host.start();
-+    defer host.stop();
-+
-+    const Box = struct {
-+        mutex: std.Io.Mutex = .init,
-+        done: ?Reason = null,
-+        tokens: usize = 0,
-+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
-+            const b: *@This() = @ptrCast(@alignCast(ctx));
-+            b.mutex.lockUncancelable(std.testing.io);
-+            defer b.mutex.unlock(std.testing.io);
-+            switch (e.*) {
-+                .tokens => |t| b.tokens += t.len,
-+                .finished => |f| b.done = f.reason,
-+                else => {},
-+            }
-+        }
-+        fn state(b: *@This()) struct { ?Reason, usize } {
-+            b.mutex.lockUncancelable(std.testing.io);
-+            defer b.mutex.unlock(std.testing.io);
-+            return .{ b.done, b.tokens };
-+        }
-+        fn waitFor(b: *@This(), ms: u32) ?Reason {
-+            for (0..ms) |_| {
-+                if (b.state()[0]) |r| return r;
-+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
-+            }
-+            return b.state()[0];
-+        }
-+    };
-+
-+    const prompt = [_]u32{ 2, 7, 1, 8 };
-+    var active_stream: Box = .{};
-+    var blocked_req: Box = .{};
-+    var short_req: Box = .{};
-+    const e = host.engine();
-+
-+    try e.submit(1, &.{ .prompt = &prompt, .max_tokens = 1 << 30 }, .{ .ctx = &active_stream, .event = Box.event });
-+    while (active_stream.state()[1] == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
-+
-+    try e.submit(2, &.{ .prompt = &prompt, .max_tokens = 50 }, .{ .ctx = &blocked_req, .event = Box.event });
-+    try e.submit(3, &.{ .prompt = &prompt, .max_tokens = 8 }, .{ .ctx = &short_req, .event = Box.event });
-+
-+    try std.testing.expectEqual(@as(?Reason, Reason.length), short_req.waitFor(500));
-+    try std.testing.expectEqual(@as(usize, 8), short_req.state()[1]);
-+
-+    try std.testing.expectEqual(@as(usize, 0), target.refuse_full);
-+    try std.testing.expect(blocked_req.state()[0] == null);
-+
++test "a request refused for room waits at the front while a short request behind it is admitted out of order" {
++    var rig: ShortRig = undefined;
++    try rig.init(2, 1);
++    defer rig.deinit();
++    rig.host.short.reserve = 1;
++    try rig.host.start();
++    var active: ShortBox = .{};
++    var blocked: ShortBox = .{};
++    var short: ShortBox = .{};
++    const e = rig.host.engine();
++    try e.submit(1, &.{ .prompt = &short_prompt, .max_tokens = 1 << 30 }, active.sink());
++    try std.testing.expect(active.waitTokens(1, 5000));
++    // the second request is refused once for room; the third is short and passes it
++    try e.submit(2, &.{ .prompt = &short_prompt, .max_tokens = 50 }, blocked.sink());
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short.sink());
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short.waitFor(500));
++    try std.testing.expectEqual(@as(usize, 8), short.state()[1]);
++    try std.testing.expectEqual(@as(usize, 0), rig.target.refuse_full);
++    try std.testing.expect(blocked.state()[0] == null);
 +    e.cancel(1);
-+    try std.testing.expect(active_stream.waitFor(5000) != null);
++    try std.testing.expect(active.waitFor(5000) != null);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), blocked.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 50), blocked.state()[1]);
++}
 +
-+    try std.testing.expectEqual(@as(?Reason, Reason.length), blocked_req.waitFor(5000));
-+    try std.testing.expectEqual(@as(usize, 50), blocked_req.state()[1]);
++test "short requests pass a request waiting for room bypass_max_skips times at most, even across a re-blocked full_retry" {
++    var rig: ShortRig = undefined;
++    try rig.init(3, 1);
++    defer rig.deinit();
++    rig.host.short.reserve = 0;
++    rig.host.short.bypass_max_skips = 1;
++    try rig.host.start();
++    var active: ShortBox = .{};
++    var blocked: ShortBox = .{};
++    var first: ShortBox = .{};
++    var second: ShortBox = .{};
++    const e = rig.host.engine();
++    try e.submit(1, &.{ .prompt = &short_prompt, .max_tokens = 1 << 30 }, active.sink());
++    try std.testing.expect(active.waitTokens(1, 5000));
++    try e.submit(2, &.{ .prompt = &short_prompt, .max_tokens = 50 }, blocked.sink());
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 8 }, first.sink());
++    try e.submit(4, &.{ .prompt = &short_prompt, .max_tokens = 8 }, second.sink());
++    // the first short request passes the blocked one; the second waits with it
++    try std.testing.expectEqual(@as(?Reason, Reason.length), first.waitFor(500));
++    // arm a second refusal before the 1 s full_retry fires: blocked retries at 1 s and hits ContextFull again,
++    // while bypass_skips stays at 1 so second still cannot bypass it
++    rig.target.refuse_full = 1;
++    for (0..1500) |_| {
++        if (rig.target.refuse_full == 0) break;
++        sleepMs(1);
++    }
++    try std.testing.expectEqual(@as(usize, 0), rig.target.refuse_full);
++    sleepMs(100);
++    try std.testing.expectEqual(@as(usize, 0), second.state()[1]);
++    try std.testing.expectEqual(@as(usize, 0), blocked.state()[1]);
++    // at the next full_retry blocked succeeds, resetting bypass_skips, and second runs after it
++    try std.testing.expectEqual(@as(?Reason, Reason.length), blocked.waitFor(5000));
++    try std.testing.expectEqual(@as(?Reason, Reason.length), second.waitFor(5000));
++    e.cancel(1);
++    try std.testing.expect(active.waitFor(5000) != null);
++}
++
++test "active_kv_cap holds a long request while the admitted streams' KV estimates fill it; a short one still runs" {
++    var rig: ShortRig = undefined;
++    try rig.init(3, 0);
++    defer rig.deinit();
++    rig.host.short.reserve = 0;
++    rig.host.short.total_ctx_max = 8; // long_prompt (16) is long, short_prompt (4) is short
++    rig.host.short.kv_alloc_step = 512;
++    rig.host.short.active_kv_cap = 600; // one long stream's estimate (16 + 512) fits, two do not
++    try rig.host.start();
++    const long_prompt: [16]u32 = @splat(1);
++    var long1: ShortBox = .{};
++    var long2: ShortBox = .{};
++    var short: ShortBox = .{};
++    const e = rig.host.engine();
++    try e.submit(1, &.{ .prompt = &long_prompt, .max_tokens = 1 << 30 }, long1.sink());
++    try std.testing.expect(long1.waitTokens(1, 5000));
++    try e.submit(2, &.{ .prompt = &long_prompt, .max_tokens = 1 << 30 }, long2.sink());
++    sleepMs(20);
++    try std.testing.expectEqual(@as(usize, 0), long2.state()[1]);
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short.sink());
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 0), long2.state()[1]);
++    e.cancel(1);
++    try std.testing.expect(long1.waitFor(5000) != null);
++    try std.testing.expect(long2.waitTokens(1, 5000));
++    e.cancel(2);
++    try std.testing.expect(long2.waitFor(5000) != null);
++}
++
++test "a short stream that decodes demote_tokens counts as long: the reserved lane is kept from the next long request" {
++    var rig: ShortRig = undefined;
++    try rig.init(3, 0);
++    defer rig.deinit();
++    rig.host.short.reserve = 1; // two long streams at most
++    rig.host.short.max_tokens = 1 << 20;
++    rig.host.short.demote_tokens = 4;
++    rig.host.short.active_kv_cap = 0;
++    rig.host.short.total_ctx_max = 8; // long requests' prompts (16) are long, the others' (4) short
++    try rig.host.start();
++    const long_prompt: [16]u32 = @splat(1);
++    var long1: ShortBox = .{};
++    var demoted: ShortBox = .{};
++    var long2: ShortBox = .{};
++    const e = rig.host.engine();
++    try e.submit(1, &.{ .prompt = &long_prompt, .max_tokens = 1 << 30 }, long1.sink());
++    try std.testing.expect(long1.waitTokens(1, 5000));
++    try e.submit(2, &.{ .prompt = &short_prompt, .max_tokens = 1 << 19 }, demoted.sink());
++    try std.testing.expect(demoted.waitTokens(4, 5000));
++    // long2 would take the second long lane, but the demoted stream holds it now
++    try e.submit(3, &.{ .prompt = &long_prompt, .max_tokens = 1 << 30 }, long2.sink());
++    sleepMs(50);
++    try std.testing.expectEqual(@as(usize, 0), long2.state()[1]);
++    e.cancel(2);
++    try std.testing.expect(demoted.waitFor(5000) != null);
++    try std.testing.expect(long2.waitTokens(1, 5000));
++    e.cancel(1);
++    e.cancel(3);
++    try std.testing.expect(long1.waitFor(5000) != null);
++    try std.testing.expect(long2.waitFor(5000) != null);
++}
++
++test "bypass_skips resets when full_retry clears the room wait and the front is then held by active_kv_cap" {
++    var rig: ShortRig = undefined;
++    try rig.init(3, 1);
++    defer rig.deinit();
++    rig.host.short = .{
++        .reserve = 0,
++        .max_tokens = 1000,
++        .total_ctx_max = 8,
++        .demote_tokens = 4,
++        .active_kv_cap = 350_000,
++        .bypass_max_skips = 1,
++        .kv_alloc_step = 200_000,
++    };
++    try rig.host.start();
++    const long_prompt: [16]u32 = @splat(1);
++    var long1: ShortBox = .{};
++    var blocked: ShortBox = .{};
++    var bypass1: ShortBox = .{};
++    var short2: ShortBox = .{};
++    const e = rig.host.engine();
++    // long1 takes a lane (KV estimate ~200k); blocked (~66) still fits active_kv_cap (350k) and hits ContextFull
++    try e.submit(1, &.{ .prompt = &long_prompt, .max_tokens = 1 << 30 }, long1.sink());
++    try std.testing.expect(long1.waitTokens(1, 5000));
++    try e.submit(2, &.{ .prompt = &long_prompt, .max_tokens = 50 }, blocked.sink());
++    for (0..5000) |_| {
++        if (rig.target.refuse_full == 0) break;
++        sleepMs(1);
++    }
++    try std.testing.expectEqual(@as(usize, 0), rig.target.refuse_full);
++    // bypass1 passes blocked (consuming bypass_max_skips = 1) and raises activeKvTokens past 400k (> 350k cap)
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 1 << 20 }, bypass1.sink());
++    try std.testing.expect(bypass1.waitTokens(1, 5000));
++    // short2 waits behind blocked while full_wait holds bypass_skips = 1; once full_retry clears full_wait,
++    // blocked is held by active_kv_cap and short2 is no longer capped by bypass_skips
++    try e.submit(4, &.{ .prompt = &short_prompt, .max_tokens = 2 }, short2.sink());
++    sleepMs(50);
++    try std.testing.expectEqual(@as(usize, 0), short2.state()[1]);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short2.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 2), short2.state()[1]);
++    try std.testing.expect(blocked.state()[0] == null);
++    e.cancel(1);
++    e.cancel(3);
++    try std.testing.expect(long1.waitFor(5000) != null);
++    try std.testing.expect(bypass1.waitFor(5000) != null);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), blocked.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 50), blocked.state()[1]);
++}
++
++test "a >active_kv_cap request at the front limits short bypasses to bypass_max_skips and runs once active short streams drain" {
++    var rig: ShortRig = undefined;
++    try rig.init(3, 0);
++    defer rig.deinit();
++    rig.host.short = .{
++        .reserve = 1,
++        .max_tokens = 0,
++        .total_ctx_max = 8,
++        .demote_tokens = 0,
++        .active_kv_cap = 100,
++        .bypass_max_skips = 1,
++        .kv_alloc_step = 4,
++    };
++    try rig.host.start();
++    const mega_prompt: [128]u32 = @splat(1);
++    var short0: ShortBox = .{};
++    var mega: ShortBox = .{};
++    var short1: ShortBox = .{};
++    var short2: ShortBox = .{};
++    const e = rig.host.engine();
++    try e.submit(1, &.{ .prompt = &short_prompt, .max_tokens = 1 << 30 }, short0.sink());
++    try std.testing.expect(short0.waitTokens(1, 5000));
++    // mega (128 + 4 = 132 > 100 cap) waits for admitted == 0; short1 consumes the 1 allowed skip and short2 waits
++    try e.submit(2, &.{ .prompt = &mega_prompt, .max_tokens = 16 }, mega.sink());
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short1.sink());
++    try e.submit(4, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short2.sink());
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short1.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 8), short1.state()[1]);
++    sleepMs(30);
++    try std.testing.expectEqual(@as(usize, 0), short2.state()[1]);
++    try std.testing.expectEqual(@as(usize, 0), mega.state()[1]);
++    e.cancel(1);
++    try std.testing.expect(short0.waitFor(5000) != null);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), mega.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 16), mega.state()[1]);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short2.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 8), short2.state()[1]);
++}
++
++test "a <=active_kv_cap request held only by admitted short streams' KV bounds short bypasses to bypass_max_skips" {
++    var rig: ShortRig = undefined;
++    try rig.init(3, 0);
++    defer rig.deinit();
++    rig.host.short = .{
++        .reserve = 0,
++        .max_tokens = 0,
++        .total_ctx_max = 8,
++        .demote_tokens = 0,
++        .active_kv_cap = 600,
++        .bypass_max_skips = 1,
++        .kv_alloc_step = 512,
++    };
++    try rig.host.start();
++    const long_prompt: [100]u32 = @splat(1);
++    var short0: ShortBox = .{};
++    var long_req: ShortBox = .{};
++    var short1: ShortBox = .{};
++    var short2: ShortBox = .{};
++    const e = rig.host.engine();
++    // short0 takes 4 + 512 = 516; long_req (100 + 16 = 116 <= 600) waits only because 516 + 116 = 632 > 600
++    try e.submit(1, &.{ .prompt = &short_prompt, .max_tokens = 1 << 30 }, short0.sink());
++    try std.testing.expect(short0.waitTokens(1, 5000));
++    try e.submit(2, &.{ .prompt = &long_prompt, .max_tokens = 16 }, long_req.sink());
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short1.sink());
++    try e.submit(4, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short2.sink());
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short1.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 8), short1.state()[1]);
++    sleepMs(30);
++    try std.testing.expectEqual(@as(usize, 0), short2.state()[1]);
++    try std.testing.expectEqual(@as(usize, 0), long_req.state()[1]);
++    e.cancel(1);
++    try std.testing.expect(short0.waitFor(5000) != null);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), long_req.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 16), long_req.state()[1]);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short2.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 8), short2.state()[1]);
++}
++
++test "short requests are not capped by bypass_max_skips when active_kv_cap holds the front because of running long streams" {
++    var rig: ShortRig = undefined;
++    try rig.init(3, 0);
++    defer rig.deinit();
++    rig.host.short = .{
++        .reserve = 0,
++        .max_tokens = 1000,
++        .total_ctx_max = 8,
++        .demote_tokens = 512,
++        .active_kv_cap = 600,
++        .bypass_max_skips = 1,
++        .kv_alloc_step = 512,
++    };
++    try rig.host.start();
++    const long1_prompt: [16]u32 = @splat(1);
++    const long2_prompt: [100]u32 = @splat(1);
++    var long1: ShortBox = .{};
++    var long2: ShortBox = .{};
++    var short1: ShortBox = .{};
++    var short2: ShortBox = .{};
++    const e = rig.host.engine();
++    // long1 (16 + 512 = 528) blocks long2 (100 + 16 = 116 -> 644 > 600): short1 and short2 both run freely
++    try e.submit(1, &.{ .prompt = &long1_prompt, .max_tokens = 1 << 30 }, long1.sink());
++    try std.testing.expect(long1.waitTokens(1, 5000));
++    try e.submit(2, &.{ .prompt = &long2_prompt, .max_tokens = 16 }, long2.sink());
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short1.sink());
++    try e.submit(4, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short2.sink());
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short1.waitFor(5000));
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short2.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 0), long2.state()[1]);
++    e.cancel(1);
++    try std.testing.expect(long1.waitFor(5000) != null);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), long2.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 16), long2.state()[1]);
++}
++
++test "cancelling a front request held by active_kv_cap clears its cap_skips and unblocks waiting short requests" {
++    var rig: ShortRig = undefined;
++    try rig.init(3, 0);
++    defer rig.deinit();
++    rig.host.short = .{
++        .reserve = 1,
++        .max_tokens = 0,
++        .total_ctx_max = 8,
++        .demote_tokens = 0,
++        .active_kv_cap = 100,
++        .bypass_max_skips = 1,
++        .kv_alloc_step = 4,
++    };
++    try rig.host.start();
++    const mega_prompt: [128]u32 = @splat(1);
++    var short0: ShortBox = .{};
++    var mega: ShortBox = .{};
++    var short1: ShortBox = .{};
++    var short2: ShortBox = .{};
++    const e = rig.host.engine();
++    try e.submit(1, &.{ .prompt = &short_prompt, .max_tokens = 1 << 30 }, short0.sink());
++    try std.testing.expect(short0.waitTokens(1, 5000));
++    try e.submit(2, &.{ .prompt = &mega_prompt, .max_tokens = 16 }, mega.sink());
++    try e.submit(3, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short1.sink());
++    try e.submit(4, &.{ .prompt = &short_prompt, .max_tokens = 8 }, short2.sink());
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short1.waitFor(5000));
++    sleepMs(30);
++    try std.testing.expectEqual(@as(usize, 0), short2.state()[1]);
++    e.cancel(2);
++    try std.testing.expect(mega.waitFor(5000) != null);
++    try std.testing.expectEqual(@as(?Reason, Reason.length), short2.waitFor(5000));
++    try std.testing.expectEqual(@as(usize, 8), short2.state()[1]);
++    e.cancel(1);
++    try std.testing.expect(short0.waitFor(5000) != null);
 +}
 -- 
 2.43.0

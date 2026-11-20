@@ -24,29 +24,38 @@ Based on historical serving distribution (`.archify/explainer-chronos-context-20
 
 ### 2.1 Configuration Changes (`scripts/local.sh`)
 - `PARALLEL=8`: Increased parallel active slots from 4 to 8.
-- `MAX_TOKENS=16384`: Lowered default output reservation from 32,768 to 16,384 to conserve pool room per stream.
+- `MAX_TOKENS=12288`: Default output reservation (lowered from upstream 32,768 to conserve pool room per stream; the earlier Section 4/5 benchmarks used `16384`).
 - `TF_FILL_CHUNKS=1`, `TF_FILL_FIRST=1`, `TF_FILL_CUT_IN=8192`: Upstream chunked prefill and cut-in settings. Prefills run in 2,048-token chunks and requests computing <=8,192 uncached tokens cut in between chunks.
-- `TF_DS_SHORT_RESERVE_LANES=2`: Reserves 2 of the 8 slots for qualifying short requests when total concurrency exceeds 6 long requests (off by default: `0`).
-- `TF_DS_SHORT_MAX_TOKENS=40960`: Maximum uncached prompt + `max_tokens` budget to qualify as short (default `40960` = upstream `32768` default `MAX_TOKENS` + `8192` `TF_FILL_CUT_IN`).
+- `TF_DS_SHORT_RESERVE_LANES=1`: Reserves 1 of the 8 lanes (clamped to `lanes - 1`) that long requests may not take (default: `1`; `0` turns it off).
+- `TF_DS_SHORT_MAX_TOKENS=6144`: Maximum uncached prompt + short-lane decode bound (`min(max_tokens, TF_SHORT_DEMOTE_TOKENS)`, or `max_tokens` when demotion is off) to qualify as short (default: `6144`; `0` turns it off).
+- `TF_SHORT_TOTAL_CTX_MAX=32768`: Maximum whole prompt length (cached + uncached tokens) to qualify as short (default: `32768`; `0` turns it off).
+- `TF_SHORT_DEMOTE_TOKENS=512`: Decoded token threshold after which an admitted short stream counts as long (`isLongNow`) (default: `512`; `0` turns it off).
+- `TF_ACTIVE_KV_CAP=786432`: Aggregate estimated KV token cap enforced on long admissions when other streams are already active (default: `786432`; `0` turns it off).
+- `TF_BYPASS_MAX_SKIPS=4`: Maximum number of short requests allowed to bypass a pool-blocked front request (`full_wait`) or a front request held from `TF_ACTIVE_KV_CAP` by admitted short streams per wait (default: `4`; `0` turns bypass off).
+- `TF_KV_ALLOC_STEP=512`: Decode lookahead tokens added to each stream's KV estimate (`max(prompt, context) + min(budget_left, TF_KV_ALLOC_STEP)`, or full `budget_left` when `0`) (default: `512`).
 - `TENSORFOLD_PREPARE_FLOOR_GIB=3`: Image preparation headroom floor.
 
 ### 2.2 Native Engine Implementation: Patch `0070-short-request-lanes.patch`
-Applied to `zig/src/core/lane_host.zig`:
-1. **Short Qualification & Admission Latching (`Job.is_short`)**:
-   - A request qualifies as short when `TF_DS_SHORT_RESERVE_LANES > 0`, uncached tokens to compute fit `cut_in` (when set), and `uncached_compute + max_tokens <= TF_DS_SHORT_MAX_TOKENS` (`40960` default).
-   - `Job.is_short` is evaluated and stored on `Job` once at admission (`longAdmittedCount()` counts admitted jobs with `!job.is_short`), so prefix caching during execution does not reclassify an active long job as short.
-2. **Short Lane Reservation**:
-   - When `longAdmittedCount() >= lanes -| short_reserve`, `admitOne` withholds non-short queued requests so up to `short_reserve` lanes remain available for short arrivals.
-   - Woken restores in `h.ready` preserve their existing priority whenever `h.full_wait == null`.
-3. **Pool-Blocked Queue Bypass**:
-   - When a request cannot be admitted due to `error.ContextFull` (or a restore hits `waitRoom`), it is marked `job.pool_blocked = true` and `requeue` sets `full_wait`.
-   - Instead of blocking all admissions behind `full_wait`, `admitOne` and `requeue` scan past `pool_blocked` / non-short entries and immediately admit eligible short requests whose admission succeeds.
+Applied to `zig/src/core/lane_host.zig` (with host unit tests in `zig/src/core/lane_host_test.zig`):
+1. **Short Qualification & Demotion (`qualifiesAsShort`, `isLongNow`)**:
+   - A request qualifies as short (independent of `reserve > 0`) when its uncached prompt fits `cut_in` (when set), its whole prompt fits `TF_SHORT_TOTAL_CTX_MAX`, and `uncached_compute + min(max_tokens, TF_SHORT_DEMOTE_TOKENS)` (or `max_tokens` when `TF_SHORT_DEMOTE_TOKENS == 0`) fits `TF_DS_SHORT_MAX_TOKENS`.
+   - `Job.is_short` is latched when selected (`canSelect`). Once an admitted short stream has emitted at least `TF_SHORT_DEMOTE_TOKENS` tokens (`isLongNow`), it counts toward `longAdmittedCount()`.
+2. **Short Lane Reservation & Aggregate KV Cap (`canAdmitJob`)**:
+   - Long requests cannot take the `TF_DS_SHORT_RESERVE_LANES` reserved lanes (`longAdmittedCount() >= lanes -| reserve`).
+   - When other streams are already admitted (`admitted.items.len > 0`) and `TF_ACTIVE_KV_CAP > 0`, long admissions also wait if `activeKvTokens()` plus the candidate's KV estimate exceeds `TF_ACTIVE_KV_CAP` (admission accounting only; the pool allocates as before).
+   - Woken restores in `h.ready` are scanned in order with the same cut-in and lane-admission checks whenever `h.full_wait == null`, before falling through to `h.queued`.
+3. **Bounded Queue Bypass (`pool_blocked`, `requeueAt`, `bypass_skips`, `cap_wait_id`, `cap_skips`)**:
+   - When a request is refused for room (`error.ContextFull`, or a restore's `waitRoom`), it is marked `job.pool_blocked = true` and queued at `requeueAt()` (`full_wait` at the front; refused bypasses re-enter behind the blocked front without shifting `full_wait`/`full_retry`).
+   - Up to `TF_BYPASS_MAX_SKIPS` short requests behind `full_wait` may bypass it immediately (a bypass that is itself refused for room still consumes a skip). `bypass_skips` is preserved across `full_retry` timer expiries and resets only when active streams drop, the front request is cancelled, or the retried front request succeeds.
+   - When a front request in `ready` or `queued` is held from `TF_ACTIVE_KV_CAP` specifically because of admitted short streams (`capBlockedByShort`: either its own KV estimate exceeds `TF_ACTIVE_KV_CAP` with only short streams active, or it would fit alongside admitted long streams alone), short bypasses past it are likewise bounded by `TF_BYPASS_MAX_SKIPS` (`cap_wait_id` / `cap_skips`) so `>TF_ACTIVE_KV_CAP` or short-KV-blocked long requests do not starve.
 
 ---
 
-## 3. Benchmark Suite (`chronos_traffic_bench.py`)
+## 3. Historical Benchmark Suite (`chronos_traffic_bench.py`)
 
-Implemented at [chronos_traffic_bench.py](file:///Users/sean/projects/Eternity/networks/chronos/benchmarks/chronos_traffic_bench.py) (deployed to `tools/chronos_traffic_bench.py` on `ai`) with `--reps N` multi-repetition support and natural essay/utility generation prompts:
+> **Note:** Sections 3–5 record historical measurements taken on the initial two-switch `0070` revision (`TF_DS_SHORT_RESERVE_LANES` / `TF_DS_SHORT_MAX_TOKENS=40960`). `tools/chronos_traffic_bench.py` has since been replaced by `tools/chronos_ab_bench.py` (`cached_sat`, `kv_cap`, `pool_starve`, `prod_replay`).
+
+Implemented at [chronos_traffic_bench.py](file:///Users/sean/projects/Eternity/networks/chronos/benchmarks/chronos_traffic_bench.py) (previously deployed at `tools/chronos_traffic_bench.py`) with `--reps N` multi-repetition support and natural essay/utility generation prompts:
 
 1. **`burst` Suite (per rep: 1 warm seed prefix + 4 agent turns + 4 short utility)** *(uses random-word filler prompts matching `exact.py`)*:
    - Fires 4 cached agent turns (~32k prompt, 28,672 cached) concurrently, followed 0.5s later by 4 uncached short utility prompts (~540 tokens).

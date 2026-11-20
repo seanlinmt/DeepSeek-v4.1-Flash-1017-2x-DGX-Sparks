@@ -29,6 +29,41 @@ class PoolSettingsTest(unittest.TestCase):
                                  ["TF_DS_WINDOW=65536"] if pool else [])
                 self.assertTrue(lines[-1].startswith("--pool " + (pool or "65536") + " --streams 4"))
 
+    def test_short_lane_env_vars_are_forwarded(self):
+        source = (ROOT / "start.sh").read_text()
+        engine = source[source.index("ENGINE_ENV=("):source.index("envs() {")]
+        short_vars = {
+            "TF_DS_SHORT_RESERVE_LANES": "2",
+            "TF_DS_SHORT_MAX_TOKENS": "8192",
+            "TF_SHORT_TOTAL_CTX_MAX": "65536",
+            "TF_SHORT_DEMOTE_TOKENS": "256",
+            "TF_ACTIVE_KV_CAP": "524288",
+            "TF_BYPASS_MAX_SKIPS": "2",
+            "TF_KV_ALLOC_STEP": "1024",
+        }
+        env = {
+            "PATH": os.environ["PATH"],
+            "CONTEXT": "65536",
+            "POOL": "",
+            "REPLAY_FLOOR": "0",
+            "PARALLEL": "4",
+            "HF_HUB_OFFLINE": "1",
+            "ROUND_ROWS": "",
+            "PREFILL_INTERLEAVE_MS": "0",
+            "RDMA_IDLE_S": "2",
+            "RDMA_NAP_US": "500",
+            "TF_UNRELATED_VAR": "1",
+            **short_vars,
+        }
+        result = subprocess.run(
+            ["bash", "-euc", engine + '\nprintf "%s\\n" "${ENGINE_ENV[@]}"'],
+            env=env, capture_output=True, text=True, check=True,
+        )
+        lines = result.stdout.splitlines()
+        for k, v in short_vars.items():
+            self.assertIn(f"{k}={v}", lines)
+        self.assertNotIn("TF_UNRELATED_VAR=1", lines)
+
 
 if __name__ == "__main__":
     unittest.main()

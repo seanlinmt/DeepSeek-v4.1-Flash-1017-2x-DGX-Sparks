@@ -109,7 +109,7 @@ Settings come from the environment, `scripts/local.sh` or `.env`; every setting 
 | `SPILL_GIB`, `KV_SHARD`, `POOL` | 0 (off), 0 (off), empty | [spill v2 and KV sharding](docs/spill-and-kv-sharding.md) |
 
 Extra arguments to `./start.sh` go to rank 0's `tensorfold-native serve` after the defaults; every `TENSORFOLD_*`, `TF_DS_*`,
-`TF_FILL_*` and `TF_SPILL_*` variable you set goes to both ranks.
+`TF_FILL_*`, `TF_SPILL_*`, `TF_SHORT_*`, `TF_ACTIVE_KV_CAP`, `TF_BYPASS_MAX_SKIPS` and `TF_KV_ALLOC_STEP` variable you set goes to both ranks.
 `TENSORFOLD_TOOL_STREAM=hold` makes a stream with tools send its tool calls whole when the reply ends instead of as they
 decode (`live`, the default; `zig/patches/README.md`, `0065`).
 

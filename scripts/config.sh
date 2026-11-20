@@ -136,6 +136,11 @@ CONTEXT="${CONTEXT:-1048576}"
 POOL="${POOL:-}"
 PARALLEL="${PARALLEL:-4}"              # requests at once (the engine's streams, TF_DS_STREAMS; the family measured 4)
 ROUND_ROWS="${ROUND_ROWS:-}"           # empty or 16: the pinned kit only has row kernels through 16 (issue #23)
+# Rank 0's in-RAM prompt-state cache budget (tensorfold-native --prompt-cache-gib; empty: the engine's own default, 0.5 GiB,
+# or 4 GiB when the spill tier is on). Kept states are KV snapshots at chunk ends that later requests reuse instead of
+# prefilling again; the store evicts to stay inside this budget (prompt_cache.evicted in /health). 0 turns the cache off.
+# It is host memory on the head, outside TENSORFOLD_MEMORY_RESERVE_GIB, and counts against MIN_AVAIL_GIB / MEMGUARD_GIB.
+PROMPT_CACHE_GIB="${PROMPT_CACHE_GIB:-}"
 MAX_TOKENS="${MAX_TOKENS:-32768}"      # a reply's budget when a request sets none
 THINKING="${THINKING:-1}"              # think first unless a request turns it off
 # The reasoning effort when a request names none: low, medium, high or xhigh (empty: the chat template's default)
@@ -148,6 +153,10 @@ THINKING_BUDGET="${THINKING_BUDGET:-}"
 # that replays every turn's reasoning in a tool loop (omp does; the template keeps it all once tools are present) otherwise shows
 # the model its own earlier thinking at every step, and long agent runs drifted into flat, then repeating reasoning (loops).
 DROP_REASONING_HISTORY="${DROP_REASONING_HISTORY:-0}"
+# 1: tensorfold-native --loop-guard (patch 0004): while a reply is inside its think block, the engine watches the reasoning
+# for an exact repeating period and ends it when one is found. The reply then continues to its answer instead of spending
+# the rest of MAX_TOKENS repeating itself. It also disables drafted rounds for the requests it applies to. Off by default.
+LOOP_GUARD="${LOOP_GUARD:-0}"
 # The family's measured sampling (BertholomusAI's two-node launch): temperature 1.0, top_p 0.95, from the 20 likeliest
 # tokens (the family's exact sampler needs a top-k). A request's own values win.
 TEMPERATURE="${TEMPERATURE:-1.0}"
